@@ -1,0 +1,8 @@
+name: gmail
+version: 1.0.0
+description: Gmail mailbox, thread reading, labels, archive, and explicitly confirmed replies in Hermes Desktop.
+manifest_version: 1
+kind: standalone
+author: Michael Guber
+license: Private
+homepage: https://github.com/guberm/hermes-gmail-desktop-plugin
