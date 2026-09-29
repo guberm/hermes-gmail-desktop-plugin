@@ -342,6 +342,7 @@ function Mailbox({ ctx, identity, queryPrefix: connectionPrefix, statusUnavailab
         ] })
       ] })
     ] }),
+    ] }),
     jsx(Confirmation, { ticket: statusUnavailable ? null : ticket, pending: busy, onCancel: closePreview, onConfirm: commit, onRestoreFocus: restoreFocus })
   ] })
 }

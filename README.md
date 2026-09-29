@@ -9,7 +9,7 @@ This repository contains one unified Hermes plugin package: the Desktop Gmail UI
 - `plugins/gmail/dashboard/manifest.json` and `plugin_api.py` - profile-scoped dashboard backend mounted at `/api/plugins/gmail/`.
 - `tests/` - focused offline source-contract tests.
 
-The `plugins/<name>/desktop/plugin.js` path is the unified-package inventory surface. Do not install a second copy under `~/.hermes/desktop-plugins/gmail/` by hand; current Hermes Desktop creates that app-level materialized copy and writes its `.hermes-package.json` pairing marker.
+The `plugins/<name>/desktop/plugin.js` path is the unified-package inventory surface. The Desktop loader evaluates this file as an ES module, so validate with `node --input-type=module --check` (plain `node --check` on `.js` may parse as CommonJS and miss module grammar errors). Do not install a second copy under `~/.hermes/desktop-plugins/gmail/` by hand; current Hermes Desktop creates that app-level materialized copy and writes its `.hermes-package.json` pairing marker.
 
 ## Install and setup
 
@@ -26,7 +26,7 @@ Search, reading, and thread inspection are read-only. Label changes, archive, se
 
 ```sh
 python -m unittest discover -s tests -v
-node --check plugins/gmail/desktop/plugin.js
+node --test tests/*.mjs
 python -m py_compile plugins/gmail/__init__.py plugins/gmail/dashboard/plugin_api.py
 ```
 
