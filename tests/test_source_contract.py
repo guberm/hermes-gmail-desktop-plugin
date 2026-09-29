@@ -20,6 +20,13 @@ class ShippedSourceContractTests(unittest.TestCase):
         self.assertTrue((ROOT / "plugins/gmail/desktop/plugin.js").is_file())
         self.assertTrue((ROOT / "plugins/gmail/dashboard/manifest.json").is_file())
 
+    def test_dashboard_backend_has_no_package_relative_imports(self):
+        imports = [
+            node for node in ast.walk(self.backend_ast)
+            if isinstance(node, ast.ImportFrom) and node.level > 0
+        ]
+        self.assertEqual(imports, [])
+
     def test_thread_route_and_reply_confirmation_contract_are_present(self):
         routes = [
             node for node in ast.walk(self.backend_ast)
