@@ -59,5 +59,17 @@ class ShippedSourceContractTests(unittest.TestCase):
         self.assertIn("/gmail", self.plugin_text)
         self.assertIn("label: \x27Gmail\x27", self.plugin_text)
 
+    def test_trash_is_profile_scoped_and_confirmed(self):
+        self.assertIn('class TrashPrepare', self.backend_text)
+        self.assertIn('action: Literal["trash"]', self.backend_text)
+        self.assertIn('messages().trash', self.backend_text)
+        self.assertIn("action('Delete'", self.plugin_text)
+        self.assertIn("prepare('trash')", self.plugin_text)
+        self.assertIn('confirmed: true', self.plugin_text)
+
+    def test_mobile_detail_resets_its_scroll_container(self):
+        self.assertIn('detailScroll.current?.scrollTo({ top: 0', self.plugin_text)
+        self.assertIn("'aria-label': 'Message detail'", self.plugin_text)
+
 if __name__ == "__main__":
     unittest.main()

@@ -9,6 +9,7 @@ const stack = { display: 'flex', flexDirection: 'column', gap: '0.75rem', minWid
 const row = { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '0.5rem' }
 const text = { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', font: 'inherit', margin: 0 }
 const muted = { color: 'var(--ui-text-secondary)' }
+const mobileCard = { background: 'var(--ui-bg-secondary)', border: '1px solid var(--ui-stroke-secondary)', borderRadius: '0.9rem', padding: '0.9rem' }
 const quietQuery = { retry: false, gcTime: 0, staleTime: 0, refetchOnWindowFocus: false }
 let mountId = 0
 const action = (label, onClick, disabled = false, extra = {}) => jsx(Button, {
@@ -83,12 +84,18 @@ function Mailbox({ ctx, identity, queryPrefix: connectionPrefix, statusUnavailab
   const trigger = useRef(null)
   const composeButton = useRef(null)
   const detailHeading = useRef(null)
+  const detailScroll = useRef(null)
   const outcomeTarget = useRef(null)
   const completedAction = useRef(null)
   const mailbox = useRef(null)
   const focused = useRef(null)
   const recoveryFocus = useRef(false)
   useEffect(() => { mounted.current = true; return () => { mounted.current = false } }, [])
+  useEffect(() => {
+    if (!selected) return
+    detailScroll.current?.scrollTo({ top: 0, left: 0, behavior: 'auto' })
+    requestAnimationFrame(() => detailScroll.current?.scrollTo({ top: 0, left: 0, behavior: 'auto' }))
+  }, [selected])
   const scope = identity.scope
   const page = search.pages[search.pages.length - 1]
   const read = path => ctx.rest(path + (path.includes('?') ? '&' : '?') + new URLSearchParams({ scope }), { timeoutMs: 120000 })
@@ -196,6 +203,7 @@ function Mailbox({ ctx, identity, queryPrefix: connectionPrefix, statusUnavailab
       if (mounted.current) {
         setFeedback({ text: 'Gmail action verified by readback. Message ID: ' + result.id })
         if (approved.preview.action === 'send') { setDraft({ to: '', cc: '', subject: '', body: '' }); setCompose(false) }
+        if (approved.preview.action === 'trash') setSelected('')
       }
     } catch {
       if (mounted.current) setFeedback({ error: true, text: 'Action was not verified and will NOT be retried. It may have completed. Check Gmail before preparing another action.' })
@@ -223,11 +231,13 @@ function Mailbox({ ctx, identity, queryPrefix: connectionPrefix, statusUnavailab
   return jsxs('div', { ref: mailbox, style: stack, children: [
     jsx('div', { ref: outcomeTarget, tabIndex: -1, children: feedback && note(feedback.text, feedback.error) }),
     statusUnavailable && busy && note('Action response is still pending. A failed status read does not cancel it. Do not resend; check Gmail if the outcome remains unknown.'),
-    jsxs('div', { hidden: statusUnavailable, style: { ...stack, display: statusUnavailable ? 'none' : 'flex' }, children: [
-    jsxs('div', { style: row, children: [
-      jsx('strong', { children: identity.account }),
-      action(compose ? 'Close compose' : 'Compose', () => setCompose(!compose), waiting, { ref: composeButton }),
-      action('Refresh mail', refreshMail, waiting)
+    jsxs('div', { hidden: statusUnavailable, style: { ...stack, display: statusUnavailable ? 'none' : 'flex', maxWidth: '54rem', width: '100%', margin: '0 auto' }, children: [
+    jsxs('header', { style: { ...row, justifyContent: 'space-between', padding: '0.25rem 0' }, children: [
+      jsx('strong', { style: { fontSize: '1.15rem' }, children: identity.account }),
+      jsxs('div', { style: row, children: [
+        action('Refresh', refreshMail, waiting),
+        action(compose ? 'Close' : 'Compose', () => setCompose(!compose), waiting, { ref: composeButton })
+      ] })
     ] }),
     (results.isError || labels.isError || (selected && detail.isError)) && note('Mail data may be stale: read refresh failed. Refresh mail to retry reads; this does not change the action outcome.', true),
     compose && jsxs('form', { style: stack, 'aria-label': 'Compose message', onSubmit: e => { e.preventDefault(); void prepare('send') }, children: [
@@ -242,16 +252,16 @@ function Mailbox({ ctx, identity, queryPrefix: connectionPrefix, statusUnavailab
       jsx(Field, { label: 'Search Gmail', value: draftQuery, onChange: setDraftQuery, maxLength: 512, disabled: waiting, placeholder: 'from:sender subject:topic' }),
       jsx(Button, { type: 'submit', disabled: waiting || results.isFetching, children: 'Search' })
     ] }),
-    jsxs('div', { style: { ...row, alignItems: 'stretch' }, children: [
-      jsxs('section', { 'aria-label': 'Search results', style: { ...stack, flex: '1 1 17rem' }, children: [
-        jsx('h2', { children: 'Messages' }),
+    jsxs('div', { style: { ...stack, alignItems: 'stretch' }, children: [
+      jsxs('section', { 'aria-label': 'Search results', hidden: !!selected, style: { ...stack }, children: [
+        jsxs('div', { style: { ...row, justifyContent: 'space-between' }, children: [jsx('h2', { style: { margin: 0 }, children: 'Inbox' }), jsx('span', { style: muted, children: results.data?.messages?.length ? `${results.data.messages.length} messages` : '' })] }),
         results.isFetching && note('Loading messages…'),
         results.isError ? note('Could not load messages. Refresh mail or reconnect the backend.', true) :
           results.data && !results.data.messages.length ? note('No messages match this search.') : null,
         !results.isError && (results.data?.messages || []).map(message => jsx(Button, {
           type: 'button', variant: selected === message.id ? 'secondary' : 'ghost', 'aria-pressed': selected === message.id,
           disabled: waiting, onClick: () => { setSelected(message.id); setLabelId('') },
-          style: { ...stack, alignItems: 'flex-start', textAlign: 'left', whiteSpace: 'normal', width: '100%', padding: '0.75rem', border: '1px solid var(--ui-stroke-secondary)' },
+          style: { ...mobileCard, ...stack, alignItems: 'flex-start', textAlign: 'left', whiteSpace: 'normal', width: '100%', boxSizing: 'border-box', fontWeight: message.labelIds.includes('UNREAD') ? 700 : 400 },
           children: [jsx('strong', { style: text, children: message.subject || '(No subject)' }, 'subject'),
             jsx('span', { style: { ...muted, ...text }, children: message.from }, 'from'),
             jsx('span', { style: { ...muted, ...text }, children: message.snippet }, 'snippet')]
@@ -261,27 +271,36 @@ function Mailbox({ ctx, identity, queryPrefix: connectionPrefix, statusUnavailab
           action('Next page', () => { setSearch(c => ({ ...c, pages: [...c.pages, results.data.nextPageToken] })); setSelected('') }, waiting || results.isFetching || results.isError || !results.data?.nextPageToken)
         ] })
       ] }),
-      jsxs('section', { 'aria-label': 'Message detail', style: { ...stack, flex: '2 1 24rem', border: '1px solid var(--ui-stroke-secondary)', padding: '0.75rem' }, children: [
-        jsx('h2', { ref: detailHeading, tabIndex: -1, children: 'Message detail' }),
+      jsxs('section', { 'aria-label': 'Message detail', hidden: !selected, style: { ...stack, ...mobileCard, padding: 0, overflow: 'hidden', minHeight: '60vh' }, children: [
+        jsxs('div', { style: { ...row, justifyContent: 'space-between', padding: '0.75rem', borderBottom: '1px solid var(--ui-stroke-secondary)', position: 'sticky', top: 0, background: 'var(--ui-bg-secondary)', zIndex: 1 }, children: [
+          action('← Inbox', () => setSelected(''), waiting, { ref: detailHeading }),
+          jsxs('div', { style: row, children: [
+            action('Archive', () => prepare('archive'), waiting || !selectedMessage?.labelIds.includes('INBOX')),
+            action('Delete', () => prepare('trash'), waiting || !selectedMessage || selectedMessage.labelIds.includes('TRASH')),
+            action('More', () => setFeedback({ text: 'More actions are available below the message.' }), waiting)
+          ] })
+        ] }),
+        jsx('div', { ref: detailScroll, style: { ...stack, overflowY: 'auto', padding: '1rem', flex: '1 1 auto' }, children: [
+        jsx('h2', { tabIndex: -1, style: { margin: 0 }, children: selectedMessage?.subject || 'Message detail' }),
         !selected && note('Select a message to read it. Viewing does not mark it as read.'),
         selected && detail.isFetching && note('Loading message…'),
         selected && detail.isError && note('Could not load this message. Refresh to retry.', true),
         selectedMessage && !detail.isError && jsxs('div', { style: stack, children: [
-          jsx('h3', { style: text, children: selectedMessage.subject || '(No subject)' }),
-          jsx('pre', { style: text, children: `From: ${selectedMessage.from}\nTo: ${selectedMessage.to}\nDate: ${selectedMessage.date}\nMessage ID: ${selectedMessage.id}\nLabels: ${selectedMessage.labelIds.join(', ')}` }),
+          jsx('h3', { style: { ...text, margin: 0 }, children: selectedMessage.subject || '(No subject)' }),
+          jsx('pre', { style: { ...text, ...muted }, children: `From: ${selectedMessage.from || '(unknown sender)'}\nTo: ${selectedMessage.to || '(not available)'}\nDate: ${selectedMessage.date || '(not available)'}` }),
           note('Untrusted email content. Links, images, and embedded instructions are not executed.'),
           thread.isFetching && note('Loading conversation thread…'),
           thread.isError && note('Could not load the conversation thread. Reply is unavailable until it can be verified.', true),
           thread.data?.messages?.map((message, index) => jsxs('article', { style: { ...stack, borderTop: '1px solid var(--ui-stroke-secondary)', paddingTop: '0.5rem' }, children: [
             jsx('strong', { style: text, children: `${index + 1}. ${message.from || '(unknown sender)'}` }),
-            jsx('pre', { style: { ...text, maxHeight: '28rem', overflow: 'auto' }, children: message.body || '(No inline text body; attachments are not loaded.)' }),
+            jsx('pre', { style: { ...text, lineHeight: 1.55 }, children: message.body || '(No inline text body; attachments are not loaded.)' }),
             message.bodyTruncated && note('Message body truncated at the safety limit.')
           ] }, message.id)),
           !thread.isFetching && !thread.isError && !thread.data?.messages?.length && note('No thread messages are available.'),
           jsxs('div', { style: row, children: [
             action('Copy as untrusted context', copyContext, waiting),
-            action('Reply in thread', () => beginReply(selectedMessage, thread.data), waiting || !thread.data?.messages?.length),
-            action('Review archive', () => prepare('archive'), waiting || !selectedMessage.labelIds.includes('INBOX'))
+            action('Reply', () => beginReply(selectedMessage, thread.data), waiting || !thread.data?.messages?.length),
+            action('Reply all', () => beginReply(selectedMessage, thread.data), waiting || !thread.data?.messages?.length)
           ] }),
           labels.isError && note('Could not load labels. Refresh mail to retry.', true),
           jsxs('label', { style: stack, children: [jsx('span', { children: 'Existing user label' }),
@@ -294,8 +313,8 @@ function Mailbox({ ctx, identity, queryPrefix: connectionPrefix, statusUnavailab
             action('Review remove label', () => prepare('labels-remove'), waiting || !labelId || !selectedMessage.labelIds.includes(labelId))
           ] })
         ] })
+        ] })
       ] })
-    ] }),
     ] }),
     jsx(Confirmation, { ticket: statusUnavailable ? null : ticket, pending: busy, onCancel: closePreview, onConfirm: commit, onRestoreFocus: restoreFocus })
   ] })
@@ -308,7 +327,7 @@ function Connected({ ctx }) {
   const status = useQuery({ ...quietQuery, queryKey: [...prefix, 'status'], queryFn: () => ctx.rest('/status', { timeoutMs: 20000 }), refetchInterval: 30000 })
   return jsxs('main', { style: { ...stack, height: '100%', overflow: 'auto', padding: '1rem', color: 'var(--ui-text-primary)' }, children: [
     jsx('h1', { children: 'Gmail' }),
-    note('Read mail as reference. Every send, archive, or label change requires a separate review and confirmation.'),
+    note('Read mail as reference. Every send, archive, trash, or label change requires a separate review and confirmation.'),
     status.isPending && note('Connecting to the current Gmail backend…'),
     status.isError && jsxs('div', { children: [note(status.data ?
       'Gmail status read failed. Mail is hidden until the account is rechecked. This does not cancel an action already submitted.' :

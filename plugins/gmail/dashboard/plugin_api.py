@@ -91,6 +91,12 @@ class ArchivePrepare(_StrictModel):
     messageId: MessageId
 
 
+class TrashPrepare(_StrictModel):
+    scope: ScopeText
+    action: Literal["trash"]
+    messageId: MessageId
+
+
 class ReplyPrepare(_StrictModel):
     scope: ScopeText
     action: Literal["reply"]
@@ -144,7 +150,7 @@ class LabelsPrepare(_StrictModel):
         return self
 
 
-PrepareRequest = Annotated[SendPrepare | ReplyPrepare | ArchivePrepare | LabelsPrepare, Field(discriminator="action")]
+PrepareRequest = Annotated[SendPrepare | ReplyPrepare | ArchivePrepare | TrashPrepare | LabelsPrepare, Field(discriminator="action")]
 
 
 class CommitRequest(_StrictModel):
@@ -772,6 +778,18 @@ def prepare_action(request: Request, body: PrepareRequest) -> dict[str, Any]:
                 "message": message,
                 "removeLabels": [{"id": "INBOX", "name": "Inbox"}],
             }
+        elif isinstance(body, TrashPrepare):
+            _, message = _get_message(service, body.messageId)
+            if "TRASH" in message["labelIds"]:
+                raise HTTPException(status_code=409, detail="Message is already in Trash.")
+            snapshot = _message_snapshot(message)
+            payload = {"messageId": body.messageId}
+            preview = {
+                "action": "trash",
+                "account": account,
+                "message": message,
+                "effect": "Move this message to Trash",
+            }
         else:
             all_labels = _list_user_labels(service)
             by_id = {item["id"]: item for item in all_labels if item["type"] == "user"}
@@ -815,7 +833,7 @@ def commit_action(request: Request, body: CommitRequest) -> dict[str, Any]:
         raise HTTPException(status_code=409, detail="Gmail connection changed; refresh status.")
 
     payload = ticket.payload
-    if ticket.action in {"archive", "labels"}:
+    if ticket.action in {"archive", "trash", "labels"}:
         try:
             _, current = _get_message(service, payload["messageId"])
         except Exception:
@@ -856,6 +874,13 @@ def commit_action(request: Request, body: CommitRequest) -> dict[str, Any]:
                     body=send_body,
                 )
             )
+        elif ticket.action == "trash":
+            result = _execute(
+                service.users().messages().trash(
+                    userId="me",
+                    id=payload["messageId"],
+                )
+            )
         else:
             modify_body = {
                 "addLabelIds": payload.get("addLabelIds", []),
@@ -874,7 +899,7 @@ def commit_action(request: Request, body: CommitRequest) -> dict[str, Any]:
     # Read back from Gmail; the mutation response itself is not treated as proof.
     try:
         result_id = _clean_provider_text(result.get("id"), 256)
-        if not _ID_RE.fullmatch(result_id) or (ticket.action in {"archive", "labels"} and result_id != payload["messageId"]):
+        if not _ID_RE.fullmatch(result_id) or (ticket.action in {"archive", "trash", "labels"} and result_id != payload["messageId"]):
             raise ValueError("invalid result")
         raw_verified, verified = _get_message(service, result_id, full=ticket.action in {"send", "reply"})
         if ticket.action in {"send", "reply"}:
@@ -897,8 +922,12 @@ def commit_action(request: Request, body: CommitRequest) -> dict[str, Any]:
                     raise ValueError("threaded reply mismatch")
         else:
             expected = set(ticket.message_snapshot["labelIds"])
-            expected.update(payload.get("addLabelIds", []))
-            expected.difference_update(payload["removeLabelIds"])
+            if ticket.action == "trash":
+                expected.add("TRASH")
+                expected.discard("INBOX")
+            else:
+                expected.update(payload.get("addLabelIds", []))
+                expected.difference_update(payload["removeLabelIds"])
             if set(verified["labelIds"]) != expected:
                 raise ValueError("label state mismatch")
     except Exception:
