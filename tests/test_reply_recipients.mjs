@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
 import test from 'node:test'
-import { deriveReplyAllRecipients } from '../plugins/gmail/desktop/reply_recipients.mjs'
+
+const plugin = fs.readFileSync(new URL('../plugins/gmail/desktop/plugin.js', import.meta.url), 'utf8')
+const functionSource = plugin.match(/export function deriveReplyAllRecipients[\s\S]*?const ID/)
+assert.ok(functionSource, 'inline reply-all function must be present in plugin.js')
+const deriveReplyAllRecipients = Function(`${functionSource[0].replace(/\n\nconst ID$/, '').replace('export function ', 'function ')}; return deriveReplyAllRecipients`)()
 
 test('reply all preserves sender and original To/Cc, excluding active account', () => {
   assert.deepEqual(

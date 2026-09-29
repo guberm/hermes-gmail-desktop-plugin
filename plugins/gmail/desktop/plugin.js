@@ -3,7 +3,30 @@ import { host, useValue, useQuery, useMutation, useQueryClient, Button, Input, T
   ROUTES_AREA, SIDEBAR_NAV_AREA, PALETTE_AREA } from '@hermes/plugin-sdk'
 import { useState, useRef, useEffect, useLayoutEffect } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
-import { deriveReplyAllRecipients } from './reply_recipients.mjs'
+
+// Hermes Desktop loads this file as a single runtime module. Keep reply-all
+// derivation here rather than importing a local helper the installer cannot load.
+export function deriveReplyAllRecipients(message, activeAccount, maxRecipients = 100) {
+  const extract = value => [...String(value || '').matchAll(/<([^<>\s@]+@[^<>\s@]+)>|\b([A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})\b/gi)]
+    .map(match => (match[1] || match[2]).toLowerCase())
+  const active = extract(activeAccount)[0]
+  const to = []
+  const cc = []
+  const seen = new Set()
+  const add = (target, value) => {
+    for (const address of extract(value)) {
+      if (address === active || seen.has(address)) continue
+      seen.add(address)
+      if (to.length + cc.length >= maxRecipients) return
+      target.push(address)
+    }
+  }
+  add(to, message?.from)
+  add(to, message?.to)
+  add(cc, message?.cc)
+  if (!to.length && !cc.length) throw new Error('reply-all has no recipients')
+  return { to: to.join(', '), cc: cc.join(', ') }
+}
 
 const ID = 'gmail'
 const stack = { display: 'flex', flexDirection: 'column', gap: '0.75rem', minWidth: 0 }

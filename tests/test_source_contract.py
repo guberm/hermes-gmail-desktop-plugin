@@ -71,10 +71,18 @@ class ShippedSourceContractTests(unittest.TestCase):
         self.assertIn('detailScroll.current?.scrollTo({ top: 0', self.plugin_text)
         self.assertIn("'aria-label': 'Message detail'", self.plugin_text)
 
-    def test_reply_all_routes_through_distinct_recipient_derivation(self):
-        self.assertIn("from './reply_recipients.mjs'", self.plugin_text)
+    def test_desktop_runtime_uses_only_permitted_imports_and_inlines_reply_all(self):
+        imports = []
+        for line in self.plugin_text.splitlines():
+            stripped = line.strip()
+            if stripped.startswith('import '):
+                imports.append(stripped)
+        self.assertTrue(all("'./" not in line and '"./' not in line for line in imports))
+        self.assertNotIn("reply_recipients.mjs", self.plugin_text)
+        self.assertIn("export function deriveReplyAllRecipients", self.plugin_text)
         self.assertIn("beginReply(selectedMessage, thread.data, true)", self.plugin_text)
         self.assertIn("deriveReplyAllRecipients(latest, identity.account)", self.plugin_text)
+        self.assertIn("maxRecipients = 100", self.plugin_text)
 
 if __name__ == "__main__":
     unittest.main()
