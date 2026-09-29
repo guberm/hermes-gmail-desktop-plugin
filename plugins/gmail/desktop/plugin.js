@@ -3,6 +3,7 @@ import { host, useValue, useQuery, useMutation, useQueryClient, Button, Input, T
   ROUTES_AREA, SIDEBAR_NAV_AREA, PALETTE_AREA } from '@hermes/plugin-sdk'
 import { useState, useRef, useEffect, useLayoutEffect } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
+import { deriveReplyAllRecipients } from './reply_recipients.mjs'
 
 const ID = 'gmail'
 const stack = { display: 'flex', flexDirection: 'column', gap: '0.75rem', minWidth: 0 }
@@ -150,12 +151,14 @@ function Mailbox({ ctx, identity, queryPrefix: connectionPrefix, statusUnavailab
     void client.invalidateQueries({ queryKey: [...queryPrefix, scope] })
   }
 
-  function beginReply(message, currentThread) {
+  function beginReply(message, currentThread, replyAll = false) {
     const latest = currentThread?.messages?.at(-1) || message
     const subject = latest.subject || ''
+    const sender = latest.from || message.from || ''
+    const replyAllRecipients = replyAll ? deriveReplyAllRecipients(latest, identity.account) : { to: sender, cc: '' }
     setDraft({
-      to: latest.from || message.from || '',
-      cc: '',
+      to: replyAllRecipients.to,
+      cc: replyAllRecipients.cc,
       subject: /^re:/i.test(subject) ? subject : `Re: ${subject}`,
       body: ''
     })
@@ -300,7 +303,7 @@ function Mailbox({ ctx, identity, queryPrefix: connectionPrefix, statusUnavailab
           jsxs('div', { style: row, children: [
             action('Copy as untrusted context', copyContext, waiting),
             action('Reply', () => beginReply(selectedMessage, thread.data), waiting || !thread.data?.messages?.length),
-            action('Reply all', () => beginReply(selectedMessage, thread.data), waiting || !thread.data?.messages?.length)
+            action('Reply all', () => beginReply(selectedMessage, thread.data, true), waiting || !thread.data?.messages?.length)
           ] }),
           labels.isError && note('Could not load labels. Refresh mail to retry.', true),
           jsxs('label', { style: stack, children: [jsx('span', { children: 'Existing user label' }),

@@ -29,6 +29,8 @@ import requests
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator, model_validator
 
+from .mutation_helpers import expected_labels_for_action
+
 router = APIRouter()
 
 _REQUEST_TIMEOUT_SECONDS = 10.0
@@ -921,13 +923,7 @@ def commit_action(request: Request, body: CommitRequest) -> dict[str, Any]:
                 ):
                     raise ValueError("threaded reply mismatch")
         else:
-            expected = set(ticket.message_snapshot["labelIds"])
-            if ticket.action == "trash":
-                expected.add("TRASH")
-                expected.discard("INBOX")
-            else:
-                expected.update(payload.get("addLabelIds", []))
-                expected.difference_update(payload["removeLabelIds"])
+            expected = expected_labels_for_action(ticket.action, ticket.message_snapshot, payload)
             if set(verified["labelIds"]) != expected:
                 raise ValueError("label state mismatch")
     except Exception:
