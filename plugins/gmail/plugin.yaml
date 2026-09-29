@@ -1,5 +1,5 @@
 name: gmail
-version: 1.0.0
+version: 1.0.1
 description: Mobile-style Gmail mailbox, thread reading, trash, labels, archive, and explicitly confirmed replies in Hermes Desktop.
 manifest_version: 1
 kind: standalone
