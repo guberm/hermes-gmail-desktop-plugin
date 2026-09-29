@@ -328,7 +328,7 @@ export function GmailPage({ ctx }) {
 }
 
 export default {
-  id: ID, name: 'Gmail', defaultEnabled: false,
+  id: ID, name: 'Gmail',
   register(ctx) {
     ctx.register({ id: 'page', area: ROUTES_AREA, data: { path: '/gmail' }, render: () => jsx(GmailPage, { ctx }) })
     ctx.register({ id: 'nav', area: SIDEBAR_NAV_AREA, data: { path: '/gmail', label: 'Gmail', codicon: 'mail' } })
