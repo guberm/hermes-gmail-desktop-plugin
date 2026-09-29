@@ -20,7 +20,17 @@ The `plugins/<name>/desktop/plugin.js` path is the unified-package inventory sur
 
 ## Safety
 
-Search, reading, and thread inspection are read-only. Label changes, archive, send, and threaded replies use an exact preview plus a separate explicit confirmation. Email content is untrusted text; attachments are not loaded or rendered. Do not retry an uncertain mutation without checking Gmail first.
+Search, reading, and thread inspection are read-only. Label changes, archive, send, and threaded replies use an exact preview plus a separate explicit confirmation. Delete moves a message to Gmail Trash, never permanent deletion; its confirmation prompt can be disabled in More, but the backend prepare ticket, account/profile binding, exact message snapshot validation, and readback verification remain required. Email content is untrusted text; attachments are not loaded or rendered. Do not retry an uncertain mutation without checking Gmail first.
+
+## Mailbox preferences and More
+
+In Gmail, open the **More** dropdown in the mailbox header (available both in the inbox and message detail). The toggles save persistently for the current Hermes profile and Gmail account:
+
+- **Auto-refresh every 60 seconds** — off by default; enable it to poll the current search at a bounded one-minute interval, or turn it off to stop automatic polling.
+- **Show unread only** — off by default; enable it to append Gmail's `is:unread` operator to the current search, or turn it off to return to the unfiltered search.
+- **Confirm before deleting** — on by default; turn it off to skip the additional on-screen confirmation after pressing Delete; turn it back on to require that review dialog. Delete remains a deliberate button press either way, and the backend safeguards remain active.
+
+With a message selected, **Mark as unread (review first)** and **Mark as read (review first)** also appear in More when applicable. They use the same preview/confirm/commit/readback flow as other label changes.
 
 ## Checks
 

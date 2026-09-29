@@ -91,5 +91,36 @@ class ShippedSourceContractTests(unittest.TestCase):
         self.assertIn("deriveReplyAllRecipients(latest, identity.account)", self.plugin_text)
         self.assertIn("maxRecipients = 100", self.plugin_text)
 
+    def test_optional_preferences_are_profile_account_scoped_and_menu_wired(self):
+        self.assertIn("settingsStorageKey(profile, identity.account)", self.plugin_text)
+        self.assertIn("ctx.storage.get(preferencesKey, null)", self.plugin_text)
+        self.assertIn("ctx.storage.set(preferencesKey, settings)", self.plugin_text)
+        self.assertIn("refetchInterval: autoRefreshInterval(settings)", self.plugin_text)
+        self.assertIn("inboxQuery(search.q, settings.unreadOnly)", self.plugin_text)
+        self.assertIn("DropdownMenuTrigger", self.plugin_text)
+        for label in ("Auto-refresh every 60 seconds", "Show unread only", "Confirm before deleting"):
+            self.assertIn(label, self.plugin_text)
+        self.assertIn("prepare('trash')", self.plugin_text)
+        self.assertIn("await commit(commitWithoutPrompt)", self.plugin_text)
+        self.assertIn("shouldConfirmDelete(current.settings)", self.plugin_text)
+
+    def test_more_read_state_actions_use_confirmed_label_pipeline(self):
+        self.assertIn("Mark as unread (review first)", self.plugin_text)
+        self.assertIn("Mark as read (review first)", self.plugin_text)
+        self.assertIn("prepare('labels-add', 'UNREAD')", self.plugin_text)
+        self.assertIn("prepare('labels-remove', 'UNREAD')", self.plugin_text)
+        self.assertIn('Only existing user labels, UNREAD, and STARRED may be changed.', self.backend_text)
+        self.assertIn('confirmed: true', self.plugin_text)
+        self.assertIn('confirmationToken: approved.confirmationToken', self.plugin_text)
+
+    def test_trash_never_becomes_permanent_delete_and_keeps_snapshot_readback(self):
+        self.assertIn('messages().trash', self.backend_text)
+        self.assertNotIn('messages().delete', self.backend_text)
+        self.assertIn('_message_snapshot(current) != ticket.message_snapshot', self.backend_text)
+        self.assertIn('expected_labels_for_action(ticket.action, ticket.message_snapshot, payload)', self.backend_text)
+
+    def test_package_version_bumped(self):
+        self.assertIn('version: 1.0.5', (ROOT / 'plugins/gmail/plugin.yaml').read_text(encoding='utf-8'))
+
 if __name__ == "__main__":
     unittest.main()

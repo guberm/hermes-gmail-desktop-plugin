@@ -1,5 +1,6 @@
 import { host, useValue, useQuery, useMutation, useQueryClient, Button, Input, Textarea,
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter,
+  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger,
   ROUTES_AREA, SIDEBAR_NAV_AREA, PALETTE_AREA } from '@hermes/plugin-sdk'
 import { useState, useRef, useEffect, useLayoutEffect } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
@@ -29,6 +30,8 @@ export function deriveReplyAllRecipients(message, activeAccount, maxRecipients =
 }
 
 const ID = 'gmail'
+const BATCH_LIMIT = 20
+const DEFAULT_SETTINGS = Object.freeze({ autoRefresh: false, unreadOnly: false, deleteConfirmation: true })
 const stack = { display: 'flex', flexDirection: 'column', gap: '0.75rem', minWidth: 0 }
 const row = { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '0.5rem' }
 const text = { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', font: 'inherit', margin: 0 }
@@ -43,6 +46,51 @@ const note = (children, error = false) => jsx('p', { role: error ? 'alert' : 'st
 const usableFocus = el => el?.isConnected && el !== document.body && el !== document.documentElement &&
   !el.matches(':disabled') && !el.closest('[hidden],[inert]') &&
   el.getClientRects().length && getComputedStyle(el).visibility === 'visible'
+
+export function gmailSettings(value) {
+  const saved = value && typeof value === 'object' && !Array.isArray(value) ? value : {}
+  return Object.fromEntries(Object.keys(DEFAULT_SETTINGS).map(key => [key,
+    typeof saved[key] === 'boolean' ? saved[key] : DEFAULT_SETTINGS[key]]))
+}
+
+export function settingsStorageKey(profile, account) {
+  return `settings:v1:${encodeURIComponent(String(profile || 'default'))}:${encodeURIComponent(String(account || '').trim().toLowerCase())}`
+}
+
+export function toggleGmailSetting(settings, key) {
+  if (!Object.hasOwn(DEFAULT_SETTINGS, key)) return settings
+  return { ...settings, [key]: !settings[key] }
+}
+
+export function inboxQuery(query, unreadOnly) {
+  const value = String(query || '').trim()
+  if (!unreadOnly || /(?:^|\s)is:unread(?:\s|$)/i.test(value)) return value
+  return `${value} is:unread`.trim()
+}
+
+export function autoRefreshInterval(settings) {
+  return settings.autoRefresh ? 60000 : false
+}
+
+export function shouldConfirmDelete(settings) {
+  return settings.deleteConfirmation
+}
+
+export function toggleMessageSelection(selection, messageId) {
+  const next = new Set(selection)
+  if (next.has(messageId)) next.delete(messageId)
+  else if (next.size < BATCH_LIMIT) next.add(messageId)
+  return next
+}
+
+export function starLabelChange(message) {
+  const starred = message.labelIds.includes('STARRED')
+  return { addLabelIds: starred ? [] : ['STARRED'], removeLabelIds: starred ? ['STARRED'] : [] }
+}
+
+function menuSetting(label, active, onClick) {
+  return jsx(DropdownMenuItem, { onClick, children: `${active ? '✓' : '○'} ${label}` })
+}
 
 export function contextText(account, message) {
   // JSON preserves boundaries even if a message contains delimiter-like text.
@@ -86,15 +134,23 @@ function Confirmation({ ticket, pending, onCancel, onConfirm, onRestoreFocus }) 
   })
 }
 
-function Mailbox({ ctx, identity, queryPrefix: connectionPrefix, statusUnavailable, retryButton }) {
+function Mailbox({ ctx, identity, profile, queryPrefix: connectionPrefix, statusUnavailable, retryButton }) {
   const client = useQueryClient()
   // An old in-flight read may outlive unmount (even with gcTime=0). Never let
   // a later A-B-A account visit attach to that abandoned query's response.
   const [instance] = useState(() => ++mountId)
   const queryPrefix = [...connectionPrefix, instance]
+  const preferencesKey = settingsStorageKey(profile, identity.account)
+  const [settings, setSettings] = useState(() => {
+    try { return gmailSettings(ctx.storage.get(preferencesKey, null)) } catch { return gmailSettings(null) }
+  })
+  useEffect(() => {
+    try { ctx.storage.set(preferencesKey, settings) } catch { /* Keep settings for this visit if storage is unavailable. */ }
+  }, [ctx, preferencesKey, settings])
   const [draftQuery, setDraftQuery] = useState('in:inbox')
   const [search, setSearch] = useState({ q: 'in:inbox', pages: [''] })
   const [selected, setSelected] = useState('')
+  const [selectedIds, setSelectedIds] = useState(() => new Set())
   const [compose, setCompose] = useState(false)
   const [draft, setDraft] = useState({ to: '', cc: '', subject: '', body: '' })
   const [draftThreadId, setDraftThreadId] = useState('')
@@ -122,9 +178,10 @@ function Mailbox({ ctx, identity, queryPrefix: connectionPrefix, statusUnavailab
   }, [selected])
   const scope = identity.scope
   const page = search.pages[search.pages.length - 1]
+  const effectiveQuery = inboxQuery(search.q, settings.unreadOnly)
   const read = path => ctx.rest(path + (path.includes('?') ? '&' : '?') + new URLSearchParams({ scope }), { timeoutMs: 120000 })
-  const results = useQuery({ ...quietQuery, enabled: !statusUnavailable, queryKey: [...queryPrefix, scope, 'search', search.q, page],
-    queryFn: () => read('/search?' + new URLSearchParams({ q: search.q, maxResults: '20', pageToken: page })) })
+  const results = useQuery({ ...quietQuery, enabled: !statusUnavailable, refetchInterval: autoRefreshInterval(settings), queryKey: [...queryPrefix, scope, 'search', effectiveQuery, page],
+    queryFn: () => read('/search?' + new URLSearchParams({ q: effectiveQuery, maxResults: '20', pageToken: page })) })
   const detail = useQuery({ ...quietQuery, queryKey: [...queryPrefix, scope, 'detail', selected], enabled: !!selected && !statusUnavailable,
     queryFn: () => read('/messages/' + encodeURIComponent(selected)) })
   const threadId = detail.data?.threadId || ''
@@ -132,7 +189,7 @@ function Mailbox({ ctx, identity, queryPrefix: connectionPrefix, statusUnavailab
     queryFn: () => read('/threads/' + encodeURIComponent(threadId)) })
   const labels = useQuery({ ...quietQuery, enabled: !statusUnavailable, queryKey: [...queryPrefix, scope, 'labels'], queryFn: () => read('/labels') })
   const mutation = useMutation({ retry: false, gcTime: 0, mutationFn: ({ path, body }) => ctx.rest(path, { method: 'POST', body, timeoutMs: 120000 }) })
-  live.current = { draft, draftThreadId, selected, labelId, ticket, search, detail: detail.data, statusUnavailable }
+  live.current = { draft, draftThreadId, selected, selectedIds, labelId, ticket, search, detail: detail.data, statusUnavailable, settings }
 
   // Track ownership BEFORE the browser drops a hidden/disabled node to BODY.
   // These refs/listener belong to this keyed Mailbox, never a later A-B-A visit.
@@ -174,6 +231,56 @@ function Mailbox({ ctx, identity, queryPrefix: connectionPrefix, statusUnavailab
     void client.invalidateQueries({ queryKey: [...queryPrefix, scope] })
   }
 
+  function toggleSetting(key) {
+    setSettings(current => toggleGmailSetting(current, key))
+    if (key === 'unreadOnly') {
+      setSearch(current => ({ ...current, pages: [''] }))
+      setSelectedIds(new Set())
+    }
+  }
+
+  function toggleSelected(messageId) {
+    setSelectedIds(current => toggleMessageSelection(current, messageId))
+  }
+
+  async function prepareBatch(operation) {
+    if (guard.current || live.current.statusUnavailable || !live.current.selectedIds.size) return
+    const current = live.current
+    guard.current = true; setBusy(true); setFeedback(null)
+    trigger.current = document.activeElement
+    completedAction.current = null
+    let commitWithoutPrompt = null
+    try {
+      const prepared = await mutation.mutateAsync({ path: '/actions/prepare', body: {
+        scope, action: 'batch', operation, messageIds: [...current.selectedIds]
+      } })
+      if (prepared.scope !== scope || !prepared.confirmationToken || !prepared.preview ||
+          prepared.preview.messages?.length !== current.selectedIds.size) throw new Error('Invalid batch preview')
+      if (operation === 'trash' && !shouldConfirmDelete(current.settings)) commitWithoutPrompt = prepared
+      else if (mounted.current) setTicket(prepared)
+    } catch {
+      if (mounted.current) setFeedback({ error: true, text: 'Could not prepare the selected-message action. No change requested. Refresh Gmail and try again.' })
+    } finally { mutation.reset(); guard.current = false; if (mounted.current) setBusy(false) }
+    if (commitWithoutPrompt && mounted.current) await commit(commitWithoutPrompt)
+  }
+
+  async function prepareOneLabel(message) {
+    if (guard.current || live.current.statusUnavailable) return
+    guard.current = true; setBusy(true); setFeedback(null)
+    trigger.current = document.activeElement
+    completedAction.current = null
+    try {
+      const change = starLabelChange(message)
+      const prepared = await mutation.mutateAsync({ path: '/actions/prepare', body: {
+        scope, action: 'labels', messageId: message.id, ...change
+      } })
+      if (prepared.scope !== scope || !prepared.confirmationToken || !prepared.preview) throw new Error('Invalid label preview')
+      if (mounted.current) setTicket(prepared)
+    } catch {
+      if (mounted.current) setFeedback({ error: true, text: 'Could not prepare the star change. No change requested. Refresh Gmail and try again.' })
+    } finally { mutation.reset(); guard.current = false; if (mounted.current) setBusy(false) }
+  }
+
   function beginReply(message, currentThread, replyAll = false) {
     const latest = currentThread?.messages?.at(-1) || message
     const subject = latest.subject || ''
@@ -194,7 +301,7 @@ function Mailbox({ ctx, identity, queryPrefix: connectionPrefix, statusUnavailab
     if (guard.current) return
     setTicket(null)
   }
-  async function prepare(kind) {
+  async function prepare(kind, labelOverride) {
     if (guard.current || live.current.statusUnavailable) return
     const current = live.current
     guard.current = true; setBusy(true); setFeedback(null)
@@ -205,20 +312,24 @@ function Mailbox({ ctx, identity, queryPrefix: connectionPrefix, statusUnavailab
     else {
       body.messageId = current.selected
       if (kind === 'labels-add' || kind === 'labels-remove') body = {
-        ...body, action: 'labels', addLabelIds: kind === 'labels-add' ? [current.labelId] : [],
-        removeLabelIds: kind === 'labels-remove' ? [current.labelId] : []
+        ...body, action: 'labels', addLabelIds: kind === 'labels-add' ? [labelOverride || current.labelId] : [],
+        removeLabelIds: kind === 'labels-remove' ? [labelOverride || current.labelId] : []
       }
     }
+    let commitWithoutPrompt = null
     try {
       const prepared = await mutation.mutateAsync({ path: '/actions/prepare', body })
       if (prepared.scope !== scope || !prepared.confirmationToken || !prepared.preview) throw new Error('Invalid preview')
-      if (mounted.current) setTicket(prepared)
+      if (mounted.current && kind === 'trash' && !shouldConfirmDelete(current.settings)) commitWithoutPrompt = prepared
+      else if (mounted.current) setTicket(prepared)
     } catch {
       if (mounted.current) setFeedback({ error: true, text: 'Could not prepare action. No change requested. Check the fields, refresh Gmail, and try again.' })
     } finally { mutation.reset(); guard.current = false; if (mounted.current) setBusy(false) }
+    // Skipping the extra UI dialog does not bypass the backend ticket, exact
+    // snapshot validation, profile/account checks, or post-mutation readback.
+    if (commitWithoutPrompt && mounted.current) await commit(commitWithoutPrompt)
   }
-  async function commit() {
-    const approved = live.current.ticket
+  async function commit(approved = live.current.ticket) {
     if (!approved || guard.current || live.current.statusUnavailable) return
     guard.current = true; setBusy(true)
     try {
@@ -230,6 +341,10 @@ function Mailbox({ ctx, identity, queryPrefix: connectionPrefix, statusUnavailab
         setFeedback({ text: 'Gmail action verified by readback. Message ID: ' + result.id })
         if (approved.preview.action === 'send') { setDraft({ to: '', cc: '', subject: '', body: '' }); setCompose(false) }
         if (approved.preview.action === 'trash') setSelected('')
+        if (approved.preview.action === 'batch') {
+          setSelectedIds(new Set())
+          if (approved.preview.operation === 'trash') setSelected('')
+        }
       }
     } catch {
       if (mounted.current) setFeedback({ error: true, text: 'Action was not verified and will NOT be retried. It may have completed. Check Gmail before preparing another action.' })
@@ -262,7 +377,22 @@ function Mailbox({ ctx, identity, queryPrefix: connectionPrefix, statusUnavailab
       jsx('strong', { style: { fontSize: '1.15rem' }, children: identity.account }),
       jsxs('div', { style: row, children: [
         action('Refresh', refreshMail, waiting),
-        action(compose ? 'Close' : 'Compose', () => setCompose(!compose), waiting, { ref: composeButton })
+        action(compose ? 'Close' : 'Compose', () => setCompose(!compose), waiting, { ref: composeButton }),
+        jsxs(DropdownMenu, { children: [
+          jsx(DropdownMenuTrigger, { asChild: true, children: jsx(Button, { type: 'button', variant: 'outline', disabled: waiting, children: 'More' }) }),
+          jsxs(DropdownMenuContent, { align: 'end', children: [
+            jsx('div', { style: { padding: '0.35rem 0.55rem', ...muted }, children: 'Settings' }),
+            menuSetting('Auto-refresh every 60 seconds', settings.autoRefresh, () => toggleSetting('autoRefresh')),
+            menuSetting('Show unread only', settings.unreadOnly, () => toggleSetting('unreadOnly')),
+            menuSetting('Confirm before deleting', settings.deleteConfirmation, () => toggleSetting('deleteConfirmation')),
+            jsx(DropdownMenuSeparator, {}),
+            jsx('div', { style: { padding: '0.35rem 0.55rem', ...muted }, children: 'Selected message' }),
+            jsx(DropdownMenuItem, { disabled: waiting || !selectedMessage || selectedMessage.labelIds.includes('UNREAD'),
+              onClick: () => { void prepare('labels-add', 'UNREAD') }, children: 'Mark as unread (review first)' }),
+            jsx(DropdownMenuItem, { disabled: waiting || !selectedMessage || !selectedMessage.labelIds.includes('UNREAD'),
+              onClick: () => { void prepare('labels-remove', 'UNREAD') }, children: 'Mark as read (review first)' })
+          ] })
+        ] })
       ] })
     ] }),
     (results.isError || labels.isError || (selected && detail.isError)) && note('Mail data may be stale: read refresh failed. Refresh mail to retry reads; this does not change the action outcome.', true),
@@ -274,9 +404,19 @@ function Mailbox({ ctx, identity, queryPrefix: connectionPrefix, statusUnavailab
       jsx(Field, { label: 'Message body', value: draft.body, onChange: changeDraft('body'), multiline: true, rows: 8, maxLength: 262144, disabled: waiting }),
       jsx(Button, { type: 'submit', disabled: waiting || !draft.to, children: busy ? 'Preparing…' : 'Review send' })
     ] }),
-    jsxs('form', { style: row, onSubmit: e => { e.preventDefault(); setSearch({ q: draftQuery, pages: [''] }); setSelected('') }, children: [
+    jsxs('form', { style: row, onSubmit: e => { e.preventDefault(); setSearch({ q: draftQuery, pages: [''] }); setSelected(''); setSelectedIds(new Set()) }, children: [
       jsx(Field, { label: 'Search Gmail', value: draftQuery, onChange: setDraftQuery, maxLength: 512, disabled: waiting, placeholder: 'from:sender subject:topic' }),
       jsx(Button, { type: 'submit', disabled: waiting || results.isFetching, children: 'Search' })
+    ] }),
+    selectedIds.size > 0 && jsxs('section', { 'aria-label': 'Bulk message actions', style: { ...row, ...mobileCard }, children: [
+      jsx('strong', { children: `${selectedIds.size} selected (maximum ${BATCH_LIMIT})` }),
+      action('Archive selected', () => prepareBatch('archive'), waiting),
+      action('Trash selected', () => prepareBatch('trash'), waiting),
+      action('Star selected', () => prepareBatch('star'), waiting),
+      action('Unstar selected', () => prepareBatch('unstar'), waiting),
+      action('Mark selected as read', () => prepareBatch('read'), waiting),
+      action('Mark selected as unread', () => prepareBatch('unread'), waiting),
+      action('Clear selection', () => setSelectedIds(new Set()), waiting)
     ] }),
     jsxs('div', { style: { ...stack, alignItems: 'stretch' }, children: [
       jsxs('section', { 'aria-label': 'Search results', hidden: !!selected, style: { ...stack }, children: [
@@ -284,17 +424,31 @@ function Mailbox({ ctx, identity, queryPrefix: connectionPrefix, statusUnavailab
         results.isFetching && note('Loading messages…'),
         results.isError ? note('Could not load messages. Refresh mail or reconnect the backend.', true) :
           results.data && !results.data.messages.length ? note('No messages match this search.') : null,
-        !results.isError && (results.data?.messages || []).map(message => jsx(Button, {
-          type: 'button', variant: selected === message.id ? 'secondary' : 'ghost', 'aria-pressed': selected === message.id,
-          disabled: waiting, onClick: () => { setSelected(message.id); setLabelId('') },
-          style: { ...mobileCard, ...stack, alignItems: 'flex-start', textAlign: 'left', whiteSpace: 'normal', width: '100%', boxSizing: 'border-box', fontWeight: message.labelIds.includes('UNREAD') ? 700 : 400 },
-          children: [jsx('strong', { style: text, children: message.subject || '(No subject)' }, 'subject'),
-            jsx('span', { style: { ...muted, ...text }, children: message.from }, 'from'),
-            jsx('span', { style: { ...muted, ...text }, children: message.snippet }, 'snippet')]
-        }, message.id)),
+        !results.isError && (results.data?.messages || []).map(message => {
+          const unread = message.labelIds.includes('UNREAD')
+          const starred = message.labelIds.includes('STARRED')
+          const isSelected = selectedIds.has(message.id)
+          return jsxs('article', { style: { ...mobileCard, ...stack, borderColor: isSelected ? 'var(--ui-accent)' : undefined }, children: [
+            jsxs('div', { style: { ...row, justifyContent: 'space-between' }, children: [
+              jsxs('label', { style: { ...row, cursor: 'pointer' }, children: [
+                jsx('input', { type: 'checkbox', checked: isSelected, disabled: waiting || (!isSelected && selectedIds.size >= BATCH_LIMIT),
+                  'aria-label': `Select message ${message.subject || message.id}`,
+                  onChange: () => toggleSelected(message.id) }),
+                jsx('span', { children: unread ? 'Unread' : 'Read' })
+              ] }),
+              action(starred ? '★ Unstar' : '☆ Star', () => prepareOneLabel(message, starred ? 'labels-remove' : 'labels-add', 'STARRED'), waiting)
+            ] }),
+            jsx(Button, { type: 'button', variant: selected === message.id ? 'secondary' : 'ghost', 'aria-pressed': selected === message.id,
+              disabled: waiting, onClick: () => { setSelected(message.id); setLabelId('') },
+              style: { ...stack, alignItems: 'flex-start', textAlign: 'left', whiteSpace: 'normal', width: '100%', boxSizing: 'border-box', fontWeight: unread ? 700 : 400 },
+              children: [jsx('strong', { style: text, children: message.subject || '(No subject)' }, 'subject'),
+                jsx('span', { style: { ...muted, ...text }, children: message.from }, 'from'),
+                jsx('span', { style: { ...muted, ...text }, children: message.snippet }, 'snippet')] })
+          ] }, message.id)
+        }),
         jsxs('div', { style: row, children: [
-          action('Previous page', () => { setSearch(c => ({ ...c, pages: c.pages.slice(0, -1) })); setSelected('') }, waiting || results.isFetching || search.pages.length < 2),
-          action('Next page', () => { setSearch(c => ({ ...c, pages: [...c.pages, results.data.nextPageToken] })); setSelected('') }, waiting || results.isFetching || results.isError || !results.data?.nextPageToken)
+          action('Previous page', () => { setSearch(c => ({ ...c, pages: c.pages.slice(0, -1) })); setSelected(''); setSelectedIds(new Set()) }, waiting || results.isFetching || search.pages.length < 2),
+          action('Next page', () => { setSearch(c => ({ ...c, pages: [...c.pages, results.data.nextPageToken] })); setSelected(''); setSelectedIds(new Set()) }, waiting || results.isFetching || results.isError || !results.data?.nextPageToken)
         ] })
       ] }),
       jsxs('section', { 'aria-label': 'Message detail', hidden: !selected, style: { ...stack, ...mobileCard, padding: 0, overflow: 'hidden', minHeight: '60vh' }, children: [
@@ -303,7 +457,7 @@ function Mailbox({ ctx, identity, queryPrefix: connectionPrefix, statusUnavailab
           jsxs('div', { style: row, children: [
             action('Archive', () => prepare('archive'), waiting || !selectedMessage?.labelIds.includes('INBOX')),
             action('Delete', () => prepare('trash'), waiting || !selectedMessage || selectedMessage.labelIds.includes('TRASH')),
-            action('More', () => setFeedback({ text: 'More actions are available below the message.' }), waiting)
+
           ] })
         ] }),
         jsx('div', { ref: detailScroll, style: { ...stack, overflowY: 'auto', padding: '1rem', flex: '1 1 auto' }, children: [
@@ -347,14 +501,14 @@ function Mailbox({ ctx, identity, queryPrefix: connectionPrefix, statusUnavailab
   ] })
 }
 
-function Connected({ ctx }) {
+function Connected({ ctx, profile }) {
   const [instance] = useState(() => ++mountId)
   const retryButton = useRef(null)
   const prefix = [ID, instance]
   const status = useQuery({ ...quietQuery, queryKey: [...prefix, 'status'], queryFn: () => ctx.rest('/status', { timeoutMs: 20000 }), refetchInterval: 30000 })
   return jsxs('main', { style: { ...stack, height: '100%', overflow: 'auto', padding: '1rem', color: 'var(--ui-text-primary)' }, children: [
     jsx('h1', { children: 'Gmail' }),
-    note('Read mail as reference. Every send, archive, trash, or label change requires a separate review and confirmation.'),
+    note('Read mail as reference. Every send, archive, trash, or label change requires review and backend confirmation.'),
     status.isPending && note('Connecting to the current Gmail backend…'),
     status.isError && jsxs('div', { children: [note(status.data ?
       'Gmail status read failed. Mail is hidden until the account is rechecked. This does not cancel an action already submitted.' :
@@ -362,7 +516,7 @@ function Connected({ ctx }) {
       action('Retry connection', () => status.refetch(), status.isFetching, { ref: retryButton })] }),
     // A transient read error must not unmount the operation owner. A verified
     // identity change still replaces it; profile/gateway changes replace Connected.
-    status.data && jsx(Mailbox, { ctx, identity: status.data, queryPrefix: prefix, statusUnavailable: status.isError, retryButton }, JSON.stringify([status.data.scope, status.data.account]))
+    status.data && jsx(Mailbox, { ctx, identity: status.data, profile, queryPrefix: prefix, statusUnavailable: status.isError, retryButton }, JSON.stringify([status.data.scope, status.data.account]))
   ] })
 }
 
@@ -370,7 +524,7 @@ export function GmailPage({ ctx }) {
   const profile = useValue(host.state.profile)
   const gateway = useValue(host.state.gateway)
   if (gateway !== 'open') return note('Gmail is disconnected. Connect the Hermes backend to continue.')
-  return jsx(Connected, { ctx }, `${profile}:${gateway}`)
+  return jsx(Connected, { ctx, profile }, `${profile}:${gateway}`)
 }
 
 export default {

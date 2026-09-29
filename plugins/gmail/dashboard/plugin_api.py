@@ -170,7 +170,21 @@ class LabelsPrepare(_StrictModel):
         return self
 
 
-PrepareRequest = Annotated[SendPrepare | ReplyPrepare | ArchivePrepare | TrashPrepare | LabelsPrepare, Field(discriminator="action")]
+class BatchPrepare(_StrictModel):
+    scope: ScopeText
+    action: Literal["batch"]
+    operation: Literal["archive", "trash", "star", "unstar", "read", "unread"]
+    messageIds: Annotated[list[MessageId], Field(min_length=1, max_length=20)]
+
+    @field_validator("messageIds")
+    @classmethod
+    def unique_message_ids(cls, value: list[str]) -> list[str]:
+        if len(value) != len(set(value)):
+            raise ValueError("message IDs must be unique")
+        return value
+
+
+PrepareRequest = Annotated[SendPrepare | ReplyPrepare | ArchivePrepare | TrashPrepare | LabelsPrepare | BatchPrepare, Field(discriminator="action")]
 
 
 class CommitRequest(_StrictModel):
@@ -202,7 +216,7 @@ class Ticket:
     account: str
     payload: dict[str, Any]
     preview: dict[str, Any]
-    message_snapshot: dict[str, Any] | None
+    message_snapshot: dict[str, Any] | list[dict[str, Any]] | None
     expires: float
 
 
@@ -757,7 +771,7 @@ def prepare_action(request: Request, body: PrepareRequest) -> dict[str, Any]:
     binding = _binding(body.scope)
     service, account, _ = _provider_context(binding)
     expires = _now() + _TICKET_TTL_SECONDS
-    snapshot: dict[str, Any] | None = None
+    snapshot: dict[str, Any] | list[dict[str, Any]] | None = None
     try:
         if isinstance(body, SendPrepare):
             payload = {"to": body.to, "cc": body.cc, "subject": body.subject, "body": body.body}
@@ -786,6 +800,41 @@ def prepare_action(request: Request, body: PrepareRequest) -> dict[str, Any]:
                 "subject": body.subject,
                 "body": body.body,
             }
+        elif isinstance(body, BatchPrepare):
+            operation = body.operation
+            if operation == "archive":
+                add_ids, remove_ids = [], ["INBOX"]
+            elif operation == "star":
+                add_ids, remove_ids = ["STARRED"], []
+            elif operation == "unstar":
+                add_ids, remove_ids = [], ["STARRED"]
+            elif operation == "unread":
+                add_ids, remove_ids = ["UNREAD"], []
+            elif operation == "read":
+                add_ids, remove_ids = [], ["UNREAD"]
+            else:
+                add_ids, remove_ids = [], []
+            all_labels = _list_user_labels(service)
+            labels_by_id = {item["id"]: item for item in all_labels}
+            if any(label_id not in labels_by_id or labels_by_id[label_id]["type"] != "system"
+                   for label_id in add_ids + remove_ids):
+                raise HTTPException(status_code=422, detail="Required Gmail system label is unavailable.")
+            messages: list[dict[str, Any]] = []
+            snapshots: list[dict[str, Any]] = []
+            for message_id in body.messageIds:
+                _, message = _get_message(service, message_id)
+                if operation == "archive" and "INBOX" not in message["labelIds"]:
+                    raise HTTPException(status_code=409, detail="Every selected message must still be in the inbox.")
+                if operation == "trash" and "TRASH" in message["labelIds"]:
+                    raise HTTPException(status_code=409, detail="A selected message is already in Trash.")
+                messages.append(message)
+                snapshots.append(_message_snapshot(message))
+            payload = {"operation": operation, "messageIds": list(body.messageIds),
+                       "addLabelIds": add_ids, "removeLabelIds": remove_ids}
+            preview = {"action": "batch", "operation": operation, "account": account,
+                       "messages": messages, "labels": [labels_by_id[label_id] for label_id in add_ids + remove_ids],
+                       "effect": f"{operation.title()} {len(messages)} selected messages"}
+            snapshot = snapshots
         elif isinstance(body, ArchivePrepare):
             _, message = _get_message(service, body.messageId)
             if "INBOX" not in message["labelIds"]:
@@ -814,8 +863,15 @@ def prepare_action(request: Request, body: PrepareRequest) -> dict[str, Any]:
             all_labels = _list_user_labels(service)
             by_id = {item["id"]: item for item in all_labels if item["type"] == "user"}
             requested = set(body.addLabelIds) | set(body.removeLabelIds)
-            if not requested.issubset(by_id):
-                raise HTTPException(status_code=422, detail="Only existing user labels may be changed.")
+            # UNREAD and STARRED are the only system-label changes surfaced
+            # by the Desktop More/card controls. Other system labels are immutable.
+            system_labels = {item["id"]: item for item in all_labels if item["type"] == "system"}
+            allowed_system = {item for item in ("UNREAD", "STARRED") if item in system_labels}
+            allowed = set(by_id) | allowed_system
+            if not requested.issubset(allowed):
+                raise HTTPException(status_code=422, detail="Only existing user labels, UNREAD, and STARRED may be changed.")
+            for label_id in requested & allowed_system:
+                by_id[label_id] = system_labels[label_id]
             _, message = _get_message(service, body.messageId)
             snapshot = _message_snapshot(message)
             payload = {
@@ -853,7 +909,27 @@ def commit_action(request: Request, body: CommitRequest) -> dict[str, Any]:
         raise HTTPException(status_code=409, detail="Gmail connection changed; refresh status.")
 
     payload = ticket.payload
-    if ticket.action in {"archive", "trash", "labels"}:
+    if ticket.action == "batch":
+        snapshots = ticket.message_snapshot
+        if not isinstance(snapshots, list) or len(snapshots) != len(payload["messageIds"]):
+            raise HTTPException(status_code=409, detail="Batch review is incomplete; action not performed.")
+        current_messages: list[dict[str, Any]] = []
+        for message_id, reviewed in zip(payload["messageIds"], snapshots, strict=True):
+            try:
+                _, current = _get_message(service, message_id)
+            except Exception:
+                raise HTTPException(status_code=502, detail="Action not performed; Gmail verification failed.") from None
+            if _message_snapshot(current) != reviewed:
+                raise HTTPException(status_code=409, detail="A selected message changed after confirmation; action not performed.")
+            current_messages.append(current)
+        if payload["addLabelIds"] or payload["removeLabelIds"]:
+            try:
+                current_labels = {item["id"]: item for item in _list_user_labels(service)}
+            except Exception:
+                raise HTTPException(status_code=502, detail="Action not performed; Gmail verification failed.") from None
+            if any(current_labels.get(item["id"]) != item for item in ticket.preview["labels"]):
+                raise HTTPException(status_code=409, detail="Gmail labels changed after confirmation; action not performed.")
+    elif ticket.action in {"archive", "trash", "labels"}:
         try:
             _, current = _get_message(service, payload["messageId"])
         except Exception:
@@ -884,7 +960,20 @@ def commit_action(request: Request, body: CommitRequest) -> dict[str, Any]:
             raise HTTPException(status_code=409, detail="Thread changed after confirmation; action not performed.")
 
     try:
-        if ticket.action in {"send", "reply"}:
+        if ticket.action == "batch":
+            results: list[dict[str, Any]] = []
+            for message_id in payload["messageIds"]:
+                if payload["operation"] == "trash":
+                    result = _execute(service.users().messages().trash(userId="me", id=message_id))
+                else:
+                    result = _execute(service.users().messages().modify(
+                        userId="me", id=message_id,
+                        body={"addLabelIds": payload["addLabelIds"], "removeLabelIds": payload["removeLabelIds"]},
+                    ))
+                if _clean_provider_text(result.get("id"), 256) != message_id:
+                    raise ValueError("invalid batch result")
+                results.append(result)
+        elif ticket.action in {"send", "reply"}:
             send_body: dict[str, Any] = {"raw": _mime_raw(payload)}
             if ticket.action == "reply":
                 send_body["threadId"] = payload["threadId"]
@@ -914,10 +1003,37 @@ def commit_action(request: Request, body: CommitRequest) -> dict[str, Any]:
                 )
             )
     except Exception:
+        # A provider error can happen after Gmail applied the current member.
+        # Read every reviewed member before returning an uncertain outcome; do
+        # not retry or continue issuing mutations from this consumed ticket.
+        if ticket.action == "batch":
+            for message_id in payload["messageIds"]:
+                try:
+                    _get_message(service, message_id)
+                except Exception:
+                    pass
         raise _provider_error(mutation_started=True) from None
 
     # Read back from Gmail; the mutation response itself is not treated as proof.
     try:
+        if ticket.action == "batch":
+            verified_batch: list[dict[str, Any]] = []
+            readback_failed = False
+            for message_id, snapshot in zip(payload["messageIds"], ticket.message_snapshot, strict=True):
+                try:
+                    _, verified_message = _get_message(service, message_id)
+                    expected = expected_labels_for_action(
+                        "trash" if payload["operation"] == "trash" else "labels", snapshot, payload
+                    )
+                    if verified_message["id"] != message_id or set(verified_message["labelIds"]) != expected:
+                        readback_failed = True
+                    verified_batch.append(verified_message)
+                except Exception:
+                    readback_failed = True
+            if readback_failed or len(verified_batch) != len(payload["messageIds"]):
+                raise ValueError("one or more batch members failed readback")
+            response = {"status": "verified", "id": verified_batch[0]["id"], "ids": [m["id"] for m in verified_batch]}
+            return response
         result_id = _clean_provider_text(result.get("id"), 256)
         if not _ID_RE.fullmatch(result_id) or (ticket.action in {"archive", "trash", "labels"} and result_id != payload["messageId"]):
             raise ValueError("invalid result")
