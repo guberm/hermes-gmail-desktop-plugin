@@ -1,6 +1,6 @@
 name: gmail
-version: 1.0.5
-description: Gmail mailbox with optional refresh/unread preferences, confirmed actions, and message controls in Hermes Desktop.
+version: 1.0.6
+description: Gmail mailbox with optional refresh/unread preferences, confirmed actions, and safe formatted email display in Hermes Desktop.
 manifest_version: 1
 kind: standalone
 author: Michael Guber

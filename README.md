@@ -7,7 +7,7 @@ This repository contains one unified Hermes plugin package: the Desktop Gmail UI
 - `plugins/gmail/plugin.yaml` and `plugins/gmail/__init__.py` - Hermes agent package declaration and inert agent-side wrapper.
 - `plugins/gmail/desktop/plugin.js` - Hermes Desktop runtime plugin. Hermes Desktop materializes this file into `~/.hermes/desktop-plugins/gmail/` and inventories it as the `gmail` package.
 - `plugins/gmail/dashboard/manifest.json` and `plugin_api.py` - profile-scoped dashboard backend mounted at `/api/plugins/gmail/`.
-- `tests/` - focused offline source-contract tests.
+- `tests/` - offline backend behavior tests, source/package contracts, and Node.js ESM/preference helper checks.
 
 The `plugins/<name>/desktop/plugin.js` path is the unified-package inventory surface. The Desktop loader evaluates this file as an ES module, so validate with `node --input-type=module --check` (plain `node --check` on `.js` may parse as CommonJS and miss module grammar errors). Do not install a second copy under `~/.hermes/desktop-plugins/gmail/` by hand; current Hermes Desktop creates that app-level materialized copy and writes its `.hermes-package.json` pairing marker.
 
@@ -20,7 +20,7 @@ The `plugins/<name>/desktop/plugin.js` path is the unified-package inventory sur
 
 ## Safety
 
-Search, reading, and thread inspection are read-only. Label changes, archive, send, and threaded replies use an exact preview plus a separate explicit confirmation. Delete moves a message to Gmail Trash, never permanent deletion; its confirmation prompt can be disabled in More, but the backend prepare ticket, account/profile binding, exact message snapshot validation, and readback verification remain required. Email content is untrusted text; attachments are not loaded or rendered. Do not retry an uncertain mutation without checking Gmail first.
+Search, reading, and thread inspection are read-only. Label changes, archive, send, and threaded replies use an exact preview plus a separate explicit confirmation. Delete moves a message to Gmail Trash, never permanent deletion; its confirmation prompt can be disabled in More, but the backend prepare ticket, account/profile binding, exact message snapshot validation, and readback verification remain required. Email HTML is sanitized to inert allowlisted formatting and displayed only in a sandboxed, no-referrer iframe with restrictive CSP; scripts, unsafe links, remote resources, forms, SVG/MathML, and CSS are removed. Attachments are not loaded or rendered. Do not retry an uncertain mutation without checking Gmail first.
 
 ## Mailbox preferences and More
 

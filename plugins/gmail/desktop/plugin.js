@@ -88,6 +88,17 @@ export function starLabelChange(message) {
   return { addLabelIds: starred ? [] : ['STARRED'], removeLabelIds: starred ? ['STARRED'] : [] }
 }
 
+export function emailHtmlDataUrl(markup) {
+  const nonce = 'gmail-inert-body-v1'
+  const document = `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'none'; media-src 'none'; connect-src 'none'; font-src 'none'; object-src 'none'; frame-src 'none'; script-src 'none'; style-src 'nonce-${nonce}'; form-action 'none'; base-uri 'none'"><meta name="viewport" content="width=device-width,initial-scale=1"><style nonce="${nonce}">body{margin:0;padding:12px;font:14px/1.55 Arial,sans-serif;color:#202124;overflow-wrap:anywhere}a{color:#1a73e8;text-decoration:underline}table{border-collapse:collapse;max-width:100%}td,th{border:1px solid #dadce0;padding:4px 8px;text-align:left;vertical-align:top}blockquote{margin:8px 0;padding-left:12px;border-left:3px solid #dadce0}pre{white-space:pre-wrap;overflow-wrap:anywhere}</style></head><body>${String(markup || '')}</body></html>`
+  const bytes = new TextEncoder().encode(document)
+  let binary = ''
+  for (let index = 0; index < bytes.length; index += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000))
+  }
+  return `data:text/html;base64,${btoa(binary)}`
+}
+
 function menuSetting(label, active, onClick) {
   return jsx(DropdownMenuItem, { onClick, children: `${active ? '✓' : '○'} ${label}` })
 }
@@ -473,7 +484,9 @@ function Mailbox({ ctx, identity, profile, queryPrefix: connectionPrefix, status
           thread.isError && note('Could not load the conversation thread. Reply is unavailable until it can be verified.', true),
           thread.data?.messages?.map((message, index) => jsxs('article', { style: { ...stack, borderTop: '1px solid var(--ui-stroke-secondary)', paddingTop: '0.5rem' }, children: [
             jsx('strong', { style: text, children: `${index + 1}. ${message.from || '(unknown sender)'}` }),
-            jsx('pre', { style: { ...text, lineHeight: 1.55 }, children: message.body || '(No inline text body; attachments are not loaded.)' }),
+            message.htmlBody
+              ? jsx('iframe', { title: `Formatted email: ${message.subject || 'message body'}`, src: emailHtmlDataUrl(message.htmlBody), sandbox: '', referrerPolicy: 'no-referrer', loading: 'lazy', 'data-email-html-frame': 'true', style: { width: '100%', minHeight: '20rem', border: '1px solid var(--ui-stroke-secondary)', borderRadius: '0.5rem', background: '#fff' } })
+              : jsx('pre', { style: { ...text, lineHeight: 1.55 }, children: message.body || '(No inline text body; attachments are not loaded.)' }),
             message.bodyTruncated && note('Message body truncated at the safety limit.')
           ] }, message.id)),
           !thread.isFetching && !thread.isError && !thread.data?.messages?.length && note('No thread messages are available.'),
@@ -497,7 +510,7 @@ function Mailbox({ ctx, identity, profile, queryPrefix: connectionPrefix, status
       ] })
     ] }),
     ] }),
-    jsx(Confirmation, { ticket: statusUnavailable ? null : ticket, pending: busy, onCancel: closePreview, onConfirm: commit, onRestoreFocus: restoreFocus })
+    jsx(Confirmation, { ticket: statusUnavailable ? null : ticket, pending: busy, onCancel: closePreview, onConfirm: () => commit(), onRestoreFocus: restoreFocus })
   ] })
 }
 

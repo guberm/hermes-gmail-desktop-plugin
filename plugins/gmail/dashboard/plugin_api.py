@@ -19,6 +19,7 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from email import policy
 from email.message import EmailMessage
+from urllib.parse import unquote, urlsplit
 
 from html.parser import HTMLParser
 from pathlib import Path
@@ -305,6 +306,175 @@ class _TextExtractor(HTMLParser):
         return "\n".join(line for line in lines if line)
 
 
+_HTML_ALLOWED_TAGS = frozenset({
+    "a", "b", "blockquote", "br", "caption", "code", "dd", "del", "div", "dl", "dt",
+    "em", "h1", "h2", "h3", "h4", "h5", "h6", "hr", "i", "li", "ol", "p", "pre",
+    "s", "small", "span", "strike", "strong", "sub", "sup", "table", "tbody", "td",
+    "tfoot", "th", "thead", "tr", "u", "ul",
+})
+_HTML_VOID_TAGS = frozenset({"br", "hr"})
+_HTML_DROP_CONTENT_TAGS = frozenset({
+    "applet", "audio", "button", "canvas", "embed", "form", "frame", "frameset", "head",
+    "iframe", "math", "noscript", "object", "script", "select", "style", "svg", "template",
+    "textarea", "video",
+})
+_HTML_DROP_TAGS = frozenset({"base", "input", "link", "meta", "source"})
+_HTML_ATTRIBUTE_TAGS = {
+    "a": frozenset({"href", "title"}),
+    "blockquote": frozenset({"cite"}),
+    "td": frozenset({"align", "colspan", "rowspan"}),
+    "th": frozenset({"align", "colspan", "rowspan", "scope"}),
+    "p": frozenset({"align"}),
+    "div": frozenset({"align"}),
+    "table": frozenset({"align"}),
+}
+_HTML_ALIGNMENT = frozenset({"left", "center", "right", "justify"})
+_HTML_MAX_OUTPUT_CHARS = 1024 * 1024
+
+
+def _safe_html_href(value: str | None) -> str | None:
+    if not value:
+        return None
+    candidate = value.strip()
+    if len(candidate) > 4096 or "\\" in candidate or any(ord(char) < 0x20 or ord(char) == 0x7F for char in candidate):
+        return None
+    try:
+        parsed = urlsplit(candidate)
+    except ValueError:
+        return None
+    scheme = parsed.scheme.lower()
+    if unquote(scheme).lower() != scheme:
+        return None
+    if scheme in {"http", "https"}:
+        return candidate if parsed.netloc and parsed.hostname and parsed.username is None and parsed.password is None else None
+    if scheme == "mailto":
+        return candidate if parsed.path and not parsed.netloc else None
+    if not scheme and candidate.startswith("#"):
+        return candidate
+    return None
+
+
+class _InertHtmlSanitizer(HTMLParser):
+    """Small fail-closed Gmail body allowlist; no source/style/resource attributes survive."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.parts: list[str] = []
+        self.open_tags: list[str] = []
+        self.suppressed: list[str] = []
+        self.output_size = 0
+
+    def _emit(self, value: str) -> None:
+        if not value or self.output_size >= _HTML_MAX_OUTPUT_CHARS:
+            return
+        remaining = _HTML_MAX_OUTPUT_CHARS - self.output_size
+        value = value[:remaining]
+        self.parts.append(value)
+        self.output_size += len(value)
+
+    def _close_open(self, tag: str) -> None:
+        if tag not in self.open_tags:
+            return
+        index = len(self.open_tags) - 1 - self.open_tags[::-1].index(tag)
+        for opened in reversed(self.open_tags[index:]):
+            self._emit(f"</{opened}>")
+        del self.open_tags[index:]
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        tag = tag.lower()
+        if self.suppressed:
+            if tag in _HTML_DROP_CONTENT_TAGS:
+                self.suppressed.append(tag)
+            return
+        if tag in _HTML_DROP_CONTENT_TAGS:
+            self.suppressed.append(tag)
+            return
+        if tag == "img":
+            alt = next((value for key, value in attrs if key.lower() == "alt" and value), "")
+            self._emit(html.escape(f"[Image: {alt[:512]}]" if alt else "[Image]"))
+            return
+        if tag in _HTML_DROP_TAGS or tag not in _HTML_ALLOWED_TAGS:
+            return
+        if tag in {"p", "li", "tr"}:
+            self._close_open(tag)
+        elif tag in {"td", "th"}:
+            self._close_open("td")
+            self._close_open("th")
+        safe_attrs: list[tuple[str, str]] = []
+        allowed = _HTML_ATTRIBUTE_TAGS.get(tag, frozenset())
+        for name, value in attrs:
+            name = name.lower()
+            if (name != "title" and name not in allowed) or value is None:
+                continue
+            value = value.strip()
+            if name == "href":
+                value = _safe_html_href(value)
+                if value is None:
+                    continue
+            elif name in {"rowspan", "colspan"}:
+                if not value.isdecimal() or not 1 <= int(value) <= 100:
+                    continue
+            elif name == "align":
+                value = value.lower()
+                if value not in _HTML_ALIGNMENT:
+                    continue
+            elif name == "scope":
+                value = value.lower()
+                if value not in {"row", "col", "rowgroup", "colgroup"}:
+                    continue
+            elif name == "cite":
+                value = _safe_html_href(value)
+                if value is None:
+                    continue
+            elif name == "title":
+                value = value[:1024]
+            safe_attrs.append((name, value))
+        if tag == "a" and any(name == "href" for name, _ in safe_attrs):
+            safe_attrs.extend((name, value) for name, value in (("rel", "noopener noreferrer nofollow"),))
+        attr_text = "".join(f' {name}="{html.escape(value, quote=True)}"' for name, value in safe_attrs)
+        self._emit(f"<{tag}{attr_text}>")
+        if tag not in _HTML_VOID_TAGS:
+            self.open_tags.append(tag)
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.lower()
+        if self.suppressed:
+            if tag in self.suppressed:
+                index = len(self.suppressed) - 1 - self.suppressed[::-1].index(tag)
+                del self.suppressed[index:]
+            return
+        if tag not in self.open_tags:
+            return
+        self._close_open(tag)
+
+    def handle_data(self, data: str) -> None:
+        if not self.suppressed:
+            self._emit(html.escape(data, quote=False))
+
+    def result(self) -> str:
+        for opened in reversed(self.open_tags):
+            self._emit(f"</{opened}>")
+        self.open_tags.clear()
+        return "".join(self.parts)
+
+
+def sanitize_email_html(source: str) -> str:
+    """Return inert formatting markup; drop active elements, CSS and resource loads."""
+    parser = _InertHtmlSanitizer()
+    try:
+        parser.feed(source[:_MAX_BODY_BYTES])
+        parser.close()
+        return parser.result()
+    except Exception:
+        return ""
+
+
+def _extract_html_body(payload: Any) -> str:
+    rich: list[tuple[str, bool]] = []
+    _walk_parts(payload, "text/html", rich)
+    return sanitize_email_html(rich[0][0]) if rich else ""
+
+
 def _current_home() -> str:
     from hermes_constants import get_hermes_home
 
@@ -571,6 +741,7 @@ def _get_message(service: Any, message_id: str, *, full: bool = False) -> tuple[
     if full:
         body, truncated = _extract_body(raw.get("payload", {}))
         public["body"] = body
+        public["htmlBody"] = _extract_html_body(raw.get("payload", {}))
         if truncated:
             public["bodyTruncated"] = True
     return raw, public
@@ -589,6 +760,7 @@ def _thread_items(raw_thread: dict[str, Any], thread_id: str) -> list[tuple[dict
             raise ValueError("thread identity mismatch")
         body, truncated = _extract_body(raw.get("payload", {}))
         public["body"] = body
+        public["htmlBody"] = _extract_html_body(raw.get("payload", {}))
         if truncated:
             public["bodyTruncated"] = True
         items.append((raw, public))
