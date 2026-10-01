@@ -120,7 +120,7 @@ class ShippedSourceContractTests(unittest.TestCase):
         self.assertIn('expected_labels_for_action(ticket.action, ticket.message_snapshot, payload)', self.backend_text)
 
     def test_package_version_bumped(self):
-        self.assertIn('version: 1.0.6', (ROOT / 'plugins/gmail/plugin.yaml').read_text(encoding='utf-8'))
+        self.assertIn('version: 1.0.7', (ROOT / 'plugins/gmail/plugin.yaml').read_text(encoding='utf-8'))
 
 if __name__ == "__main__":
     unittest.main()

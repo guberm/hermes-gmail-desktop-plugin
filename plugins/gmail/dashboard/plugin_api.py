@@ -333,10 +333,10 @@ _HTML_MAX_OUTPUT_CHARS = 1024 * 1024
 
 
 def _safe_html_href(value: str | None) -> str | None:
-    if not value:
+    if not value or value != value.strip() or "\\" in value or any(ord(char) < 0x20 or ord(char) == 0x7F for char in value):
         return None
-    candidate = value.strip()
-    if len(candidate) > 4096 or "\\" in candidate or any(ord(char) < 0x20 or ord(char) == 0x7F for char in candidate):
+    candidate = value
+    if len(candidate) > 4096 or re.search(r"%(?:0[0-9a-f]|1[0-9a-f]|7f)", candidate, re.IGNORECASE):
         return None
     try:
         parsed = urlsplit(candidate)
@@ -349,9 +349,17 @@ def _safe_html_href(value: str | None) -> str | None:
         return candidate if parsed.netloc and parsed.hostname and parsed.username is None and parsed.password is None else None
     if scheme == "mailto":
         return candidate if parsed.path and not parsed.netloc else None
-    if not scheme and candidate.startswith("#"):
-        return candidate
     return None
+
+
+def _safe_html_image_url(value: str | None) -> str | None:
+    candidate = _safe_html_href(value)
+    if candidate is None:
+        return None
+    try:
+        return candidate if urlsplit(candidate).scheme.lower() == "https" else None
+    except ValueError:
+        return None
 
 
 class _InertHtmlSanitizer(HTMLParser):
@@ -391,7 +399,13 @@ class _InertHtmlSanitizer(HTMLParser):
             return
         if tag == "img":
             alt = next((value for key, value in attrs if key.lower() == "alt" and value), "")
-            self._emit(html.escape(f"[Image: {alt[:512]}]" if alt else "[Image]"))
+            src = next((value for key, value in attrs if key.lower() == "src" and value), None)
+            safe_src = _safe_html_image_url(src)
+            safe_attrs = [("alt", alt[:512])] if alt else []
+            if safe_src:
+                safe_attrs.append(("data-email-src", safe_src))
+            attr_text = "".join(f' {name}="{html.escape(value, quote=True)}"' for name, value in safe_attrs)
+            self._emit(f"<img{attr_text}>")
             return
         if tag in _HTML_DROP_TAGS or tag not in _HTML_ALLOWED_TAGS:
             return

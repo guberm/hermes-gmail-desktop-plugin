@@ -243,8 +243,43 @@ class BackendTests(unittest.TestCase):
         )
         self.assertIn('<strong>world</strong>', safe)
         self.assertIn('href="https://example.com/x"', safe)
-        self.assertIn('[Image: remote image]', safe)
-        for forbidden in ('onclick', 'onerror', 'script', 'steal()', 'javascript:', '<form', '<input', '<svg', '<style', 'remote.example'):
+        self.assertIn('data-email-src="https://remote.example/pixel"', safe)
+        for forbidden in ('onclick', 'onerror', 'script', 'steal()', 'javascript:', '<form', '<input', '<svg', '<style', ' src='):
+            self.assertNotIn(forbidden, safe)
+
+    def test_html_sanitizer_keeps_safe_remote_image_as_inert_data_only(self):
+        safe = api.sanitize_email_html(
+            '<img src="https://images.example.test/a.png?x=1&amp;y=2" alt="photo">'
+        )
+        self.assertIn('data-email-src="https://images.example.test/a.png?x=1&amp;y=2"', safe)
+        self.assertIn('alt="photo"', safe)
+        self.assertNotIn(' src=', safe)
+
+    def test_html_sanitizer_rejects_unsafe_image_urls(self):
+        for url in (
+            'http://images.example.test/a.png',
+            'javascript:alert(1)',
+            'data:image/png;base64,AAAA',
+            'https://user:pass@images.example.test/a.png',
+            'https://images.example.test/\ntracker.png',
+        ):
+            with self.subTest(url=url):
+                safe = api.sanitize_email_html(f'<img src="{url}" alt="blocked">')
+                self.assertNotIn('data-email-src=', safe)
+                self.assertNotIn('src=', safe)
+                self.assertNotIn(url.strip(), safe)
+
+    def test_html_sanitizer_preserves_only_safe_clickable_link_protocols(self):
+        safe = api.sanitize_email_html(
+            '<a href="https://example.test/path?q=1&amp;x=2">https</a>'
+            '<a href="mailto:person@example.test">mail</a>'
+            '<a href="javascript:alert(1)">bad</a>'
+            '<a href="https://user:pass@example.test/">credentialed</a>'
+            '<a href="data:text/html,boom">data</a>'
+        )
+        self.assertIn('href="https://example.test/path?q=1&amp;x=2"', safe)
+        self.assertIn('href="mailto:person@example.test"', safe)
+        for forbidden in ('javascript:', 'user:pass', 'data:text/html'):
             self.assertNotIn(forbidden, safe)
 
     def test_profile_scope_isolation_A_B_A_at_call_time(self):
