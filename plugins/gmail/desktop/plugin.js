@@ -33,14 +33,108 @@ const EMAIL_TAGS = new Set(['a', 'b', 'blockquote', 'br', 'caption', 'code', 'dd
 const EMAIL_DROP_CONTENT = new Set(['applet', 'audio', 'button', 'canvas', 'embed', 'form', 'frame', 'frameset', 'head', 'iframe', 'math', 'noscript', 'object', 'select', 'style', 'svg', 'template', 'textarea', 'video', 'script'])
 const EMAIL_STYLES = {
   a: { color: 'var(--ui-accent)', textDecoration: 'underline', cursor: 'pointer' },
-  blockquote: { margin: '8px 0', paddingLeft: '12px', borderLeft: '3px solid #dadce0' },
+  blockquote: { margin: '8px 0', paddingLeft: '12px', borderLeft: '3px solid var(--ui-stroke-secondary)' },
   p: { margin: '0.25rem 0' },
-  table: { borderCollapse: 'collapse', maxWidth: '100%' },
-  td: { border: '1px solid #dadce0', padding: '4px 8px', textAlign: 'left', verticalAlign: 'top' },
-  th: { border: '1px solid #dadce0', padding: '4px 8px', textAlign: 'left', verticalAlign: 'top' },
+  table: { borderCollapse: 'collapse', maxWidth: '100%', boxSizing: 'border-box' },
+  td: { border: '1px solid var(--ui-stroke-secondary)', padding: '4px 8px', textAlign: 'left', verticalAlign: 'top' },
+  th: { border: '1px solid var(--ui-stroke-secondary)', padding: '4px 8px', textAlign: 'left', verticalAlign: 'top' },
   pre: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }
 }
+const EMAIL_STYLE_PROPERTIES = new Set([
+  'width', 'max-width', 'height', 'max-height', 'margin', 'margin-top', 'margin-right', 'margin-bottom',
+  'margin-left', 'padding', 'padding-top', 'padding-right', 'padding-bottom', 'padding-left', 'border-spacing',
+  'border-radius', 'font-family', 'font-size', 'font-style', 'font-weight', 'line-height', 'text-align',
+  'text-decoration', 'vertical-align', 'border-collapse', 'border', 'border-top', 'border-right', 'border-bottom',
+  'border-left', 'white-space', 'overflow-wrap', 'word-break', 'box-sizing', 'table-layout'
+])
+const EMAIL_FONT_FAMILIES = new Set(['arial', 'helvetica', 'verdana', 'tahoma', 'georgia', 'times new roman', 'courier new', 'sans-serif', 'serif', 'monospace'])
+const EMAIL_BORDER_COLORS = /^(?:#[0-9a-f]{3}|#[0-9a-f]{6}|black|white|gray|grey|silver|navy|blue|teal)$/i
 const MAIL_ACCOUNT_RE = /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/
+
+function safeEmailLength(token, maximum = 1200, percentMaximum = 100) {
+  const value = String(token || '').trim().toLowerCase()
+  if (value === '0') return value
+  const match = /^(\d+(?:\.\d{1,2})?|\.\d{1,2})(px|em|rem|pt|%)$/.exec(value)
+  if (!match) return null
+  const number = Number(match[1])
+  return number >= 0 && number <= (match[2] === '%' ? percentMaximum : maximum) ? `${number}${match[2]}` : null
+}
+
+function safeEmailCssValue(name, raw) {
+  const value = String(raw || '').trim().toLowerCase().replace(/\s+/g, ' ')
+  if (!value || value.length > 128 || /[\\{}@]/.test(value) || /(?:url|expression|var)\s*\(/i.test(value)) return null
+  const lengths = new Set(['width', 'max-width', 'height', 'max-height', 'margin-top', 'margin-right', 'margin-bottom', 'margin-left', 'padding-top', 'padding-right', 'padding-bottom', 'padding-left', 'border-radius'])
+  if (lengths.has(name)) return safeEmailLength(value, name.startsWith('padding') ? 128 : name === 'border-radius' ? 32 : 1200)
+  if (name === 'margin' || name === 'padding' || name === 'border-spacing') {
+    const parts = value.split(' ')
+    if (!parts.length || parts.length > (name === 'border-spacing' ? 2 : 4)) return null
+    const parsed = parts.map(part => part === 'auto' && name === 'margin' ? part : safeEmailLength(part, name === 'padding' ? 128 : name === 'border-spacing' ? 32 : 1200, name === 'border-spacing' ? 0 : 100))
+    return parsed.every(Boolean) ? parsed.join(' ') : null
+  }
+  if (name === 'font-size') {
+    const parsed = safeEmailLength(value, 48, 0)
+    return parsed && parsed !== '0' ? parsed : null
+  }
+  if (name === 'font-family') {
+    const families = value.split(',').map(item => item.trim().replace(/^['"]|['"]$/g, ''))
+    return families.length <= 4 && families.length > 0 && families.every(item => EMAIL_FONT_FAMILIES.has(item)) ? families.join(',') : null
+  }
+  if (name === 'font-weight') return ['normal', 'bold'].includes(value) || (/^(?:[1-9]00)$/.test(value)) ? value : null
+  if (name === 'font-style') return ['normal', 'italic', 'oblique'].includes(value) ? value : null
+  if (name === 'line-height') {
+    if (/^(?:0|[1-9]\d?)(?:\.\d{1,2})?$/.test(value)) return Number(value) >= 0.8 && Number(value) <= 2.4 ? value : null
+    return safeEmailLength(value, 80, 0)
+  }
+  if (name === 'text-align') return ['left', 'center', 'right', 'justify'].includes(value) ? value : null
+  if (name === 'vertical-align') return ['top', 'middle', 'bottom', 'baseline'].includes(value) ? value : null
+  if (name === 'text-decoration') return ['none', 'underline', 'line-through', 'overline'].includes(value) ? value : null
+  if (name === 'border-collapse') return ['collapse', 'separate'].includes(value) ? value : null
+  if (name.startsWith('border-') || name === 'border') {
+    const parts = value.split(' ')
+    if (parts.length > 3) return null
+    const width = parts.find(part => part === '0' || part.endsWith('px'))
+    const style = parts.find(part => ['none', 'solid', 'dotted', 'dashed', 'double'].includes(part))
+    const color = parts.find(part => EMAIL_BORDER_COLORS.test(part))
+    if (!style || parts.length !== [width, style, color].filter(Boolean).length) return null
+    if (width && safeEmailLength(width, 8, 0) === null) return null
+    return [width, style, color].filter(Boolean).join(' ')
+  }
+  if (name === 'white-space') return ['normal', 'nowrap', 'pre', 'pre-wrap'].includes(value) ? value : null
+  if (name === 'overflow-wrap') return ['normal', 'break-word', 'anywhere'].includes(value) ? value : null
+  if (name === 'word-break') return ['normal', 'break-all', 'keep-all'].includes(value) ? value : null
+  if (name === 'box-sizing') return ['border-box', 'content-box'].includes(value) ? value : null
+  if (name === 'table-layout') return ['auto', 'fixed'].includes(value) ? value : null
+  return null
+}
+
+export function projectEmailStyle(tag, element) {
+  const projected = { ...(EMAIL_STYLES[tag] || {}) }
+  for (const declaration of String(element.getAttribute('style') || '').slice(0, 4096).split(';').slice(0, 32)) {
+    const colon = declaration.indexOf(':')
+    if (colon < 1) continue
+    const name = declaration.slice(0, colon).trim().toLowerCase()
+    if (!EMAIL_STYLE_PROPERTIES.has(name)) continue
+    const value = safeEmailCssValue(name, declaration.slice(colon + 1))
+    if (value === null) continue
+    const reactName = name.replace(/-([a-z])/g, (_, letter) => letter.toUpperCase())
+    projected[reactName] = value
+  }
+  if (tag === 'table') {
+    projected.maxWidth = '100%'
+    projected.boxSizing = 'border-box'
+    const width = safeEmailLength(element.getAttribute('width')) || (/^\d{1,4}$/.test(element.getAttribute('width') || '') ? `${element.getAttribute('width')}px` : null)
+    if (width && !projected.width) projected.width = width
+  }
+  return Object.keys(projected).length ? projected : undefined
+}
+
+export function safeEmailImageDimensions(element) {
+  const attrWidth = element.getAttribute('width')
+  const inlineWidth = String(element.getAttribute('style') || '').slice(0, 4096).split(';').map(item => item.split(':', 2)).find(([name]) => name?.trim().toLowerCase() === 'width')?.[1]
+  const widthValue = inlineWidth ? safeEmailCssValue('width', inlineWidth) : null
+  const width = widthValue || safeEmailLength(attrWidth, 1200, 0) || (/^\d{1,4}$/.test(attrWidth || '') && Number(attrWidth) <= 1200 ? `${Number(attrWidth)}px` : null)
+  return { ...(width ? { width } : {}), maxWidth: '100%', height: 'auto', objectFit: 'contain' }
+}
 
 export function safeExternalHref(value) {
   if (typeof value !== 'string' || !value || value.length > 4096 || /[\u0000-\u001f\u007f\\]/.test(value)) return null
@@ -126,11 +220,11 @@ function emailNode(node, key, imagesEnabled, ctx, linkify = true) {
   if (tag === 'img') {
     const alt = node.getAttribute('alt') || ''
     const src = imagesEnabled ? safeExternalImageHref(node.getAttribute('data-email-src')) : null
-    if (!src) return alt ? jsx('span', { children: `[Image: ${alt}]` }, key) : null
-    return jsx('img', { src, alt, referrerPolicy: 'no-referrer', loading: 'lazy', style: { maxWidth: '100%', height: 'auto' } }, key)
+    if (!src) return jsx('span', { role: 'note', style: { display: 'inline-block', padding: '0.2rem 0.4rem', border: '1px solid var(--ui-stroke-secondary)', borderRadius: '0.25rem', color: 'var(--ui-text-secondary)', fontSize: '0.8em' }, children: alt ? `Image blocked: ${alt}` : 'Image blocked: no description' }, key)
+    return jsx('img', { src, alt, referrerPolicy: 'no-referrer', loading: 'lazy', style: safeEmailImageDimensions(node) }, key)
   }
   const props = { key }
-  for (const name of ['title', 'align', 'colspan', 'rowspan', 'scope']) {
+  for (const name of ['title', 'align', 'colspan', 'rowspan', 'scope', 'width', 'height', 'valign', 'cellpadding', 'cellspacing', 'border']) {
     const value = node.getAttribute(name)
     if (value !== null) props[name === 'colspan' ? 'colSpan' : name === 'rowspan' ? 'rowSpan' : name] = value
   }
@@ -152,25 +246,26 @@ function emailNode(node, key, imagesEnabled, ctx, linkify = true) {
       }
     }
   }
-  const elementProps = { ...props, style: EMAIL_STYLES[tag] }
+  const elementProps = { ...props, style: projectEmailStyle(tag, node) }
   // HTML void tags have no children; React throws #137 if an empty children
   // prop is passed for <br> or <hr> from untrusted email markup.
   if (tag === 'br' || tag === 'hr') return jsx(tag, elementProps, key)
   return jsx(tag, { ...elementProps, children: [...node.childNodes].map((child, index) => emailNode(child, `${key}.${index}`, imagesEnabled, ctx, tag === 'a' ? false : linkify)) }, key)
 }
 
-export function EmailBody({ markup, ctx }) {
-  const [imagesEnabled, setImagesEnabled] = useState(false)
+export function EmailBody({ markup, ctx, alwaysShowImages = false }) {
+  const [imageConsent, setImageConsent] = useState({ persistent: false, value: false })
   // Only the backend's HTMLParser sanitizer feeds this detached inert template;
   // React renders a fresh allowlist and never inserts provider markup into live DOM.
   const fragment = document.createElement('template')
   fragment.innerHTML = String(markup || '')
+  const imagesEnabled = imageConsent.persistent === alwaysShowImages ? imageConsent.value : alwaysShowImages
   const rendered = [...fragment.content.childNodes].map((node, index) => emailNode(node, String(index), imagesEnabled, ctx))
-  const imagesPresent = fragment.content.querySelector('img[data-email-src]') !== null
+  const imageCount = fragment.content.querySelectorAll('img[data-email-src]').length
   return jsxs('div', { style: { ...stack, gap: '0.35rem', font: '14px/1.55 Arial,sans-serif', color: 'var(--ui-text-primary)', overflowWrap: 'anywhere' }, children: [
-    imagesPresent && jsxs('div', { style: row, children: [
-      note('Remote images can reveal that you opened this email and may identify your activity to the sender (tracking).'),
-      action(imagesEnabled ? 'Hide images' : 'Load images', () => setImagesEnabled(enabled => !enabled))
+    imageCount > 0 && jsxs('div', { style: { ...row, justifyContent: 'space-between', padding: '0.45rem', border: '1px solid var(--ui-stroke-secondary)', borderRadius: '0.4rem' }, children: [
+      note('Remote images may track email opens.'),
+      action(imagesEnabled ? 'Hide images' : `Load images (${imageCount})`, () => setImageConsent({ persistent: alwaysShowImages, value: !imagesEnabled }), false, { 'aria-label': `${imagesEnabled ? 'Hide' : 'Load'} images (${imageCount})` })
     ] }),
     ...rendered
   ] })
@@ -185,7 +280,7 @@ export function GmailThreadAction({ account, threadId, ctx, disabled = false }) 
 
 const ID = 'gmail'
 const BATCH_LIMIT = 20
-const DEFAULT_SETTINGS = Object.freeze({ autoRefresh: false, unreadOnly: false, deleteConfirmation: true })
+const DEFAULT_SETTINGS = Object.freeze({ autoRefresh: false, unreadOnly: false, deleteConfirmation: true, alwaysShowImages: false })
 const stack = { display: 'flex', flexDirection: 'column', gap: '0.75rem', minWidth: 0 }
 const row = { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '0.5rem' }
 const text = { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', font: 'inherit', margin: 0 }
@@ -242,8 +337,8 @@ export function starLabelChange(message) {
   return { addLabelIds: starred ? [] : ['STARRED'], removeLabelIds: starred ? ['STARRED'] : [] }
 }
 
-function menuSetting(label, active, onClick) {
-  return jsx(DropdownMenuItem, { onClick, children: `${active ? '✓' : '○'} ${label}` })
+function menuSetting(label, active, onClick, extra = {}) {
+  return jsx(DropdownMenuItem, { role: 'menuitemcheckbox', 'aria-checked': active, onClick, ...extra, children: `${active ? '✓' : '○'} ${label}` })
 }
 
 export function contextText(account, message) {
@@ -311,6 +406,7 @@ function Mailbox({ ctx, identity, profile, queryPrefix: connectionPrefix, status
   const [labelId, setLabelId] = useState('')
   const [ticket, setTicket] = useState(null)
   const [feedback, setFeedback] = useState(null)
+  const [readFeedback, setReadFeedback] = useState(null)
   const [busy, setBusy] = useState(false)
   const guard = useRef(false)
   const live = useRef(null)
@@ -321,6 +417,7 @@ function Mailbox({ ctx, identity, profile, queryPrefix: connectionPrefix, status
   const detailScroll = useRef(null)
   const outcomeTarget = useRef(null)
   const completedAction = useRef(null)
+  const readOnOpenStarted = useRef(new Set())
   const mailbox = useRef(null)
   const focused = useRef(null)
   const recoveryFocus = useRef(false)
@@ -344,6 +441,26 @@ function Mailbox({ ctx, identity, profile, queryPrefix: connectionPrefix, status
   const labels = useQuery({ ...quietQuery, enabled: !statusUnavailable, queryKey: [...queryPrefix, scope, 'labels'], queryFn: () => read('/labels') })
   const mutation = useMutation({ retry: false, gcTime: 0, mutationFn: ({ path, body }) => ctx.rest(path, { method: 'POST', body, timeoutMs: 120000 }) })
   live.current = { draft, draftThreadId, selected, selectedIds, labelId, ticket, search, detail: detail.data, statusUnavailable, settings }
+
+  async function markOpenedMessageRead(messageId, retry = false) {
+    if (!messageId || live.current.statusUnavailable || !mounted.current) return
+    if (retry) readOnOpenStarted.current.delete(messageId)
+    if (readOnOpenStarted.current.has(messageId)) return
+    readOnOpenStarted.current.add(messageId)
+    try {
+      const result = await ctx.rest(`/messages/${encodeURIComponent(messageId)}/read?${new URLSearchParams({ scope })}`, { method: 'POST', timeoutMs: 120000 })
+      if (!mounted.current || live.current.selected !== messageId) return
+      if (result?.status !== 'verified' || result.id !== messageId || !Array.isArray(result.labelIds) || result.labelIds.includes('UNREAD')) throw new Error('Unverified read state')
+      client.setQueryData([...queryPrefix, scope, 'detail', messageId], current => current?.id === messageId ? { ...current, labelIds: result.labelIds } : current)
+      if (live.current.selected === messageId) setReadFeedback(null)
+    } catch {
+      // A failed request must not poison the per-message dedupe set. The
+      // selection guard below still prevents stale feedback on another message;
+      // reopening this unread message can now issue a fresh attempt.
+      readOnOpenStarted.current.delete(messageId)
+      if (mounted.current && live.current.selected === messageId) setReadFeedback({ id: messageId, text: 'Could not verify read status. Refresh Gmail to check; unread state remains pending.' })
+    }
+  }
 
   // Track ownership BEFORE the browser drops a hidden/disabled node to BODY.
   // These refs/listener belong to this keyed Mailbox, never a later A-B-A visit.
@@ -523,6 +640,10 @@ function Mailbox({ ctx, identity, profile, queryPrefix: connectionPrefix, status
   const selectedMessage = detail.data
   const waiting = busy || !!ticket || statusUnavailable
   const changeDraft = key => value => setDraft(current => ({ ...current, [key]: value }))
+  useEffect(() => {
+    if (selectedMessage?.id === selected && selectedMessage.labelIds?.includes('UNREAD')) void markOpenedMessageRead(selected)
+    else if (readFeedback && readFeedback.id !== selected) setReadFeedback(null)
+  }, [selected, selectedMessage?.id, selectedMessage?.labelIds?.join(','), statusUnavailable])
   return jsxs('div', { ref: mailbox, style: stack, children: [
     jsx('div', { ref: outcomeTarget, tabIndex: -1, children: feedback && note(feedback.text, feedback.error) }),
     statusUnavailable && busy && note('Action response is still pending. A failed status read does not cancel it. Do not resend; check Gmail if the outcome remains unknown.'),
@@ -539,6 +660,7 @@ function Mailbox({ ctx, identity, profile, queryPrefix: connectionPrefix, status
             menuSetting('Auto-refresh every 60 seconds', settings.autoRefresh, () => toggleSetting('autoRefresh')),
             menuSetting('Show unread only', settings.unreadOnly, () => toggleSetting('unreadOnly')),
             menuSetting('Confirm before deleting', settings.deleteConfirmation, () => toggleSetting('deleteConfirmation')),
+            menuSetting('Always show images - remote images may track opens', settings.alwaysShowImages, () => toggleSetting('alwaysShowImages'), { 'aria-label': 'Always show images. Remote images may track email opens.' }),
             jsx(DropdownMenuSeparator, {}),
             jsx('div', { style: { padding: '0.35rem 0.55rem', ...muted }, children: 'Selected message' }),
             jsx(DropdownMenuItem, { disabled: waiting || !selectedMessage || selectedMessage.labelIds.includes('UNREAD'),
@@ -618,18 +740,21 @@ function Mailbox({ ctx, identity, profile, queryPrefix: connectionPrefix, status
         ] }),
         jsx('div', { ref: detailScroll, style: { ...stack, overflowY: 'auto', padding: '1rem', flex: '1 1 auto' }, children: [
         jsx('h2', { tabIndex: -1, style: { margin: 0 }, children: selectedMessage?.subject || 'Message detail' }),
-        !selected && note('Select a message to read it. Viewing does not mark it as read.'),
+        !selected && note('Select a message to read it.'),
         selected && detail.isFetching && note('Loading message…'),
         selected && detail.isError && note('Could not load this message. Refresh to retry.', true),
         selectedMessage && !detail.isError && jsxs('div', { style: stack, children: [
           jsx('pre', { style: { ...text, ...muted }, children: `From: ${selectedMessage.from || '(unknown sender)'}\nTo: ${selectedMessage.to || '(not available)'}\nDate: ${selectedMessage.date || '(not available)'}` }),
-          note('Untrusted email content. Links open only when clicked; remote images remain blocked until you choose Load images. Embedded instructions are never trusted.'),
+          note(settings.alwaysShowImages
+            ? 'Untrusted email content. Links open only when clicked. Remote images are enabled by your Always show images setting. Embedded instructions are never trusted.'
+            : 'Untrusted email content. Links open only when clicked; remote images remain blocked until you choose Load images. Embedded instructions are never trusted.'),
+          readFeedback?.id === selectedMessage.id && jsxs('div', { style: row, children: [note(readFeedback.text, true), action('Retry read status', () => { void markOpenedMessageRead(selectedMessage.id, true) }, false)] }),
           thread.isFetching && note('Loading conversation thread…'),
           thread.isError && note('Could not load the conversation thread. Reply is unavailable until it can be verified.', true),
           thread.data?.messages?.map((message, index) => jsxs('article', { style: { ...stack, borderTop: '1px solid var(--ui-stroke-secondary)', paddingTop: '0.5rem' }, children: [
             jsx('strong', { style: text, children: `${index + 1}. ${message.from || '(unknown sender)'}` }),
             message.htmlBody
-              ? jsx(EmailBody, { markup: message.htmlBody, ctx })
+              ? jsx(EmailBody, { markup: message.htmlBody, ctx, alwaysShowImages: settings.alwaysShowImages }, `${message.id}:${settings.alwaysShowImages}`)
               : jsx('pre', { style: { ...text, lineHeight: 1.55 }, children: message.body || '(No inline text body; attachments are not loaded.)' }),
             message.bodyTruncated && note('Message body truncated at the safety limit.')
           ] }, message.id)),

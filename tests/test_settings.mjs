@@ -15,7 +15,7 @@ function loadFunction(name, nextName, prefix = '') {
   return Function(`${prefix}\n${fn}\nreturn ${name}`)()
 }
 
-const defaults = 'const DEFAULT_SETTINGS = Object.freeze({ autoRefresh: false, unreadOnly: false, deleteConfirmation: true })'
+const defaults = 'const DEFAULT_SETTINGS = Object.freeze({ autoRefresh: false, unreadOnly: false, deleteConfirmation: true, alwaysShowImages: false })'
 const settings = loadFunction('gmailSettings', 'settingsStorageKey', defaults)
 const storageKey = loadFunction('settingsStorageKey', 'toggleGmailSetting')
 const toggle = loadFunction('toggleGmailSetting', 'inboxQuery', defaults)
@@ -26,9 +26,19 @@ const toggleSelection = loadFunction('toggleMessageSelection', 'gmailSettings', 
 const starChange = loadFunction('starLabelChange', 'contextText')
 
 test('preference defaults and persisted booleans are explicit', () => {
-  assert.deepEqual(settings(null), { autoRefresh: false, unreadOnly: false, deleteConfirmation: true })
-  assert.deepEqual(settings({ autoRefresh: true, unreadOnly: 'yes', deleteConfirmation: false, unknown: true }),
-    { autoRefresh: true, unreadOnly: false, deleteConfirmation: false })
+  assert.deepEqual(settings(null), { autoRefresh: false, unreadOnly: false, deleteConfirmation: true, alwaysShowImages: false })
+  assert.deepEqual(settings({ autoRefresh: true, unreadOnly: 'yes', deleteConfirmation: false, alwaysShowImages: true, unknown: true }),
+    { autoRefresh: true, unreadOnly: false, deleteConfirmation: false, alwaysShowImages: true })
+})
+
+test('Always show images is independently toggleable and cannot change another preference', () => {
+  const original = settings(null)
+  const enabled = toggle(original, 'alwaysShowImages')
+  assert.equal(original.alwaysShowImages, false)
+  assert.equal(enabled.alwaysShowImages, true)
+  assert.equal(enabled.autoRefresh, original.autoRefresh)
+  assert.equal(enabled.unreadOnly, original.unreadOnly)
+  assert.equal(toggle(enabled, 'alwaysShowImages').alwaysShowImages, false)
 })
 
 test('settings persist under isolated profile and normalized account keys', () => {

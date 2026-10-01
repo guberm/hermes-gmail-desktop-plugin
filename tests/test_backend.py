@@ -255,6 +255,130 @@ class BackendTests(unittest.TestCase):
         self.assertIn('alt="photo"', safe)
         self.assertNotIn(' src=', safe)
 
+    def test_reported_youtube_shape_preserves_inert_no_alt_image_and_bounded_dimensions(self):
+        safe = api.sanitize_email_html(
+            '<img width="480" height="360" src="http://i.ytimg.com/vi/synthetic/hqdefault.jpg">'
+        )
+        self.assertIn('width="480"', safe)
+        self.assertIn('height="360"', safe)
+        self.assertIn('data-email-src="https://i.ytimg.com/vi/synthetic/hqdefault.jpg"', safe)
+        self.assertNotIn(' src=', safe)
+        self.assertNotIn('alt=', safe)
+
+    def test_rich_email_inline_css_is_a_strict_safe_projection(self):
+        safe = api.sanitize_email_html(
+            '<table width="600" style="width:600px;max-width:100%;margin:0 auto;text-align:center;'
+            'border-collapse:collapse;color:#000;background-image:url(https://tracker.invalid/x);'
+            'position:fixed;visibility:hidden;opacity:0;display:none"><tr>'
+            '<td width="48" style="padding:4px 8px;font-size:14px;font-weight:bold;vertical-align:top;'
+            'background:url(https://tracker.invalid/y)">tile</td></tr></table>'
+            '<link rel="stylesheet" href="https://tracker.invalid/email.css">'
+            '<style>@import url(https://tracker.invalid/r.css); body{background:url(https://tracker.invalid/z)}</style>'
+        )
+        for allowed in ('width:600px', 'max-width:100%', 'margin:0 auto', 'text-align:center',
+                        'border-collapse:collapse', 'padding:4px 8px', 'font-size:14px',
+                        'font-weight:bold', 'vertical-align:top', 'width="600"', 'width="48"'):
+            self.assertIn(allowed, safe)
+        for forbidden in ('tracker.invalid', 'position:', 'visibility:', 'opacity:', 'display:none',
+                          'color:#000', '@import', '<style', '<link', 'background'):
+            self.assertNotIn(forbidden, safe)
+
+    def test_html_sanitizer_drops_one_by_one_no_alt_tracking_pixels(self):
+        safe = api.sanitize_email_html(
+            '<img src="https://tracker.invalid/pixel" width="1" height="1">'
+            '<img src="https://images.example.test/tile.png" width="48" height="48">'
+        )
+        self.assertNotIn('tracker.invalid', safe)
+        self.assertIn('data-email-src="https://images.example.test/tile.png"', safe)
+        self.assertIn('width="48"', safe)
+
+    def test_duplicate_img_attributes_use_browser_first_value_for_filter_and_output(self):
+        fixtures = (
+            # First width/height values describe a tracker pixel; later large
+            # duplicates must not make the browser-visible 1x1 image survive.
+            '<img src="https://tracker.invalid/width-first" width="1" width="48" height="1" height="48">',
+            '<img src="https://tracker.invalid/style-first" style="width:1px;height:1px" style="width:48px;height:48px">',
+            # Reverse ordering keeps a legitimate image and emits the same
+            # browser-visible values rather than the later duplicates.
+            '<img src="https://images.example.test/width-large-first" width="48" width="1" height="48" height="1">',
+            '<img src="https://images.example.test/style-large-first" style="width:48px;height:48px" style="width:1px;height:1px">',
+        )
+        safe = api.sanitize_email_html(''.join(fixtures))
+        self.assertNotIn('tracker.invalid/width-first', safe)
+        self.assertNotIn('tracker.invalid/style-first', safe)
+        self.assertIn('<img width="48" height="48" data-email-src="https://images.example.test/width-large-first">', safe)
+        self.assertIn('<img style="width:48px;height:48px" data-email-src="https://images.example.test/style-large-first">', safe)
+
+    def test_html_presentation_dimensions_and_table_depth_are_bounded(self):
+        nested = '<table>' * 18 + 'x' + '</table>' * 18
+        safe = api.sanitize_email_html(
+            '<table width="99999" cellpadding="500"><tr><td width="99%" rowspan="1000">x</td></tr></table>'
+            + nested
+        )
+        self.assertNotIn('width="99999"', safe)
+        self.assertNotIn('cellpadding=', safe)
+        self.assertNotIn('rowspan="1000"', safe)
+        self.assertLessEqual(safe.count('<table'), api._HTML_MAX_TABLES)
+        self.assertLessEqual(safe.count('<table'), api._HTML_MAX_TABLE_DEPTH + api._HTML_MAX_TABLES)
+
+    def test_html_css_spacing_and_height_reject_layout_spacers(self):
+        safe = api.sanitize_email_html(
+            '<table height="601" style="height:601px;margin-left:200px;padding:64px">'
+            '<tr><td style="padding:8px 12px;margin:8px auto">content</td></tr></table>'
+        )
+        self.assertNotIn('height="601"', safe)
+        self.assertNotIn('height:601px', safe)
+        self.assertNotIn('margin-left:200px', safe)
+        self.assertNotIn('padding:64px', safe)
+        self.assertIn('padding:8px 12px', safe)
+        self.assertIn('margin:8px auto', safe)
+
+    def test_read_on_open_removes_only_unread_and_verifies_backend_readback(self):
+        scope = self.status()['scope']
+        fake = self.services[str(self.a)]
+        fake.messages['m1']['labelIds'] = ['INBOX', 'UNREAD', 'STARRED', 'L1']
+        response = self.client.post('/api/plugins/gmail/messages/m1/read', params={'scope': scope})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json(), {
+            'status': 'verified', 'id': 'm1', 'labelIds': ['INBOX', 'L1', 'STARRED']
+        })
+        modifies = [call for call in fake.calls if call[0] == 'modify']
+        self.assertEqual(len(modifies), 1)
+        self.assertEqual(modifies[0][1]['body'], {'addLabelIds': [], 'removeLabelIds': ['UNREAD']})
+
+    def test_read_on_open_already_read_is_a_verified_noop(self):
+        scope = self.status()['scope']
+        fake = self.services[str(self.a)]
+        response = self.client.post('/api/plugins/gmail/messages/m1/read', params={'scope': scope})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()['status'], 'verified')
+        self.assertFalse(any(call[0] == 'modify' for call in fake.calls))
+
+    def test_read_on_open_rejects_bad_identity_and_mismatched_profile_scope(self):
+        scope_a = self.status()['scope']
+        fake_a = self.services[str(self.a)]
+        self.assertIn(self.client.post('/api/plugins/gmail/messages/bad%2Fid/read', params={'scope': scope_a}).status_code, (404, 422))
+        token_b = set_hermes_home_override(self.b)
+        try:
+            scope_b = self.status()['scope']
+            self.assertEqual(self.client.post('/api/plugins/gmail/messages/m1/read', params={'scope': scope_a}).status_code, 409)
+            self.assertFalse(any(call[0] == 'modify' for call in self.services[str(self.b)].calls))
+            self.assertEqual(self.client.post('/api/plugins/gmail/messages/m1/read', params={'scope': scope_b}).status_code, 200)
+        finally:
+            reset_hermes_home_override(token_b)
+        self.assertFalse(any(call[0] == 'modify' for call in fake_a.calls))
+
+    def test_read_on_open_provider_failure_is_sanitized_and_not_retried(self):
+        scope = self.status()['scope']
+        fake = self.services[str(self.a)]
+        fake.messages['m1']['labelIds'].append('UNREAD')
+        fake.failures['modify'] = 'SECRET provider payload'
+        response = self.client.post('/api/plugins/gmail/messages/m1/read', params={'scope': scope})
+        self.assertEqual(response.status_code, 502)
+        self.assertNotIn('SECRET', response.text)
+        self.assertIn('uncertain', response.json()['detail'].lower())
+        self.assertEqual(sum(kind == 'modify' for kind, _ in fake.executions), 1)
+
     def test_reported_youtube_thumbnail_is_upgraded_inertly_and_text_urls_survive(self):
         fixture = (
             '<p>Video: https://www.youtube.com/watch?v=e7TY56-yIvM.</p>'

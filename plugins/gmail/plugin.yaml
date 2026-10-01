@@ -1,6 +1,6 @@
 name: gmail
-version: 1.0.9
-description: Gmail mailbox with confirmed actions, privacy-gated images, safe links, and theme-aware formatted email display in Hermes Desktop.
+version: 1.0.10
+description: Gmail mailbox with profile-bound read-on-open, privacy-gated images, responsive safe email rendering, and reviewed mailbox actions.
 manifest_version: 1
 kind: standalone
 author: Michael Guber

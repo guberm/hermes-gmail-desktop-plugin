@@ -59,6 +59,7 @@ _MAX_SCOPES = 128
 _MAX_BODY_BYTES = 256 * 1024
 _MAX_PROVIDER_TEXT = 16 * 1024
 _MAX_THREAD_MESSAGES = 100
+_READ_ON_OPEN_LOCK = threading.Lock()
 _ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,256}$")
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{20,256}$")
 _RFC_MESSAGE_ID_RE = re.compile(r"^<[^<>\s@]+@[^<>\s@]+>$")
@@ -322,14 +323,192 @@ _HTML_DROP_TAGS = frozenset({"base", "input", "link", "meta", "source"})
 _HTML_ATTRIBUTE_TAGS = {
     "a": frozenset({"href", "title"}),
     "blockquote": frozenset({"cite"}),
-    "td": frozenset({"align", "colspan", "rowspan"}),
-    "th": frozenset({"align", "colspan", "rowspan", "scope"}),
+    "td": frozenset({"align", "colspan", "rowspan", "width", "height", "valign"}),
+    "th": frozenset({"align", "colspan", "rowspan", "scope", "width", "height", "valign"}),
     "p": frozenset({"align"}),
     "div": frozenset({"align"}),
-    "table": frozenset({"align"}),
+    "table": frozenset({"align", "width", "height", "cellpadding", "cellspacing", "border"}),
 }
+_HTML_IMAGE_ATTRIBUTES = ("width", "height")
 _HTML_ALIGNMENT = frozenset({"left", "center", "right", "justify"})
+_HTML_VERTICAL_ALIGNMENT = frozenset({"top", "middle", "bottom", "baseline"})
 _HTML_MAX_OUTPUT_CHARS = 1024 * 1024
+_HTML_MAX_TABLES = 96
+_HTML_MAX_TABLE_DEPTH = 12
+
+# Email CSS is projected through this deliberately small allowlist. Foreground
+# and background color, resource-bearing CSS, selector rules, positioning,
+# visibility, opacity and display are never retained. Each surviving value is
+# parsed below; this is not a raw-style pass-through.
+_EMAIL_CSS_LENGTH_PROPERTIES = frozenset({
+    "width", "max-width", "height", "max-height", "margin", "margin-top", "margin-right",
+    "margin-bottom", "margin-left", "padding", "padding-top", "padding-right", "padding-bottom",
+    "padding-left", "border-spacing", "border-radius",
+})
+_EMAIL_CSS_ALLOWLIST = frozenset({
+    *_EMAIL_CSS_LENGTH_PROPERTIES, "font-family", "font-size", "font-style", "font-weight",
+    "line-height", "text-align", "text-decoration", "vertical-align", "border-collapse",
+    "border", "border-top", "border-right", "border-bottom", "border-left", "white-space",
+    "overflow-wrap", "word-break", "box-sizing", "table-layout",
+})
+_EMAIL_CSS_LENGTH_RE = re.compile(r"^(?:0|(?:\d+(?:\.\d{1,2})?|\.\d{1,2})(px|em|rem|pt|%))$", re.I)
+_EMAIL_CSS_FONTS = frozenset({"arial", "helvetica", "verdana", "tahoma", "georgia", "times new roman", "courier new", "sans-serif", "serif", "monospace"})
+_EMAIL_CSS_BORDER_STYLE = frozenset({"none", "solid", "dotted", "dashed", "double"})
+_EMAIL_CSS_BORDER_COLOR = re.compile(r"^(?:#[0-9a-f]{3}|#[0-9a-f]{6}|black|white|gray|grey|silver|navy|blue|teal)$", re.I)
+
+
+def _css_spacing_limit(property_name: str, token_index: int = 0) -> float:
+    if property_name == "padding" or property_name.startswith("padding-"):
+        return 32
+    if property_name == "margin" or property_name.startswith("margin-"):
+        return 64 if token_index in {1, 3} or property_name in {"margin-left", "margin-right"} else 128
+    return 1200
+
+
+def _css_length(token: str, *, maximum: float = 1200, percent_maximum: float = 100) -> str | None:
+    value = token.strip().lower()
+    if value in {"auto", "none"}:
+        return value
+    match = _EMAIL_CSS_LENGTH_RE.fullmatch(value)
+    if not match:
+        return None
+    number = 0.0 if value == "0" else float(value[:-len(match.group(1))])
+    unit = match.group(1).lower() if match.group(1) else ""
+    limit = percent_maximum if unit == "%" else maximum
+    if number < 0 or number > limit:
+        return None
+    return f"{number:g}{unit}"
+
+
+def _safe_email_css_value(property_name: str, raw: str) -> str | None:
+    value = " ".join(raw.strip().lower().split())
+    if not value or len(value) > 128 or any(char in value for char in "\\{}") or "@" in value:
+        return None
+    if re.search(r"(?:url|expression|var)\s*\(", value, re.I):
+        return None
+    if property_name in _EMAIL_CSS_LENGTH_PROPERTIES:
+        if property_name in {"margin", "padding"}:
+            tokens = value.split()
+            if not 1 <= len(tokens) <= 4:
+                return None
+            parsed: list[str] = []
+            for index, token in enumerate(tokens):
+                if token == "auto" and property_name == "margin":
+                    parsed.append(token)
+                    continue
+                length = _css_length(token, maximum=_css_spacing_limit(property_name, index))
+                if length is None or length == "none":
+                    return None
+                parsed.append(length)
+            return " ".join(parsed)
+        if property_name == "border-spacing":
+            tokens = value.split()
+            if not 1 <= len(tokens) <= 2:
+                return None
+            parsed = [_css_length(token, maximum=32, percent_maximum=0) for token in tokens]
+            return " ".join(parsed) if all(parsed) else None
+        maximum = 480 if property_name in {"height", "max-height"} else 32 if property_name == "border-radius" else _css_spacing_limit(property_name)
+        length = _css_length(value, maximum=maximum)
+        if length == "none":
+            return None
+        return length
+    if property_name == "font-size":
+        length = _css_length(value, maximum=48, percent_maximum=0)
+        return length if length not in {None, "auto", "none"} else None
+    if property_name == "font-family":
+        names = [part.strip().strip("\"'") for part in value.split(",")]
+        if not 1 <= len(names) <= 4 or any(name not in _EMAIL_CSS_FONTS for name in names):
+            return None
+        return ",".join(names)
+    if property_name == "font-weight":
+        if value in {"normal", "bold"}:
+            return value
+        return value if value.isdecimal() and 100 <= int(value) <= 900 and int(value) % 100 == 0 else None
+    if property_name == "font-style":
+        return value if value in {"normal", "italic", "oblique"} else None
+    if property_name == "line-height":
+        if re.fullmatch(r"(?:0|[1-9]\d?)(?:\.\d{1,2})?", value):
+            return value if 0.8 <= float(value) <= 2.4 else None
+        length = _css_length(value, maximum=80, percent_maximum=0)
+        return length if length not in {None, "auto", "none"} else None
+    if property_name == "text-align":
+        return value if value in _HTML_ALIGNMENT else None
+    if property_name == "vertical-align":
+        return value if value in _HTML_VERTICAL_ALIGNMENT else None
+    if property_name == "text-decoration":
+        return value if value in {"none", "underline", "line-through", "overline"} else None
+    if property_name == "border-collapse":
+        return value if value in {"collapse", "separate"} else None
+    if property_name.startswith("border") and property_name != "border-collapse":
+        parts = value.split()
+        width = next((part for part in parts if part.endswith("px") or part == "0"), None)
+        style = next((part for part in parts if part in _EMAIL_CSS_BORDER_STYLE), None)
+        color = next((part for part in parts if _EMAIL_CSS_BORDER_COLOR.fullmatch(part)), None)
+        if len(parts) != len({item for item in (width, style, color) if item is not None}) or not style:
+            return None
+        if width is not None:
+            parsed_width = _css_length(width, maximum=8, percent_maximum=0)
+            if parsed_width is None:
+                return None
+        return " ".join(item for item in (width, style, color) if item is not None)
+    if property_name == "white-space":
+        return value if value in {"normal", "nowrap", "pre", "pre-wrap"} else None
+    if property_name == "overflow-wrap":
+        return value if value in {"normal", "break-word", "anywhere"} else None
+    if property_name == "word-break":
+        return value if value in {"normal", "break-all", "keep-all"} else None
+    if property_name == "box-sizing":
+        return value if value in {"border-box", "content-box"} else None
+    if property_name == "table-layout":
+        return value if value in {"auto", "fixed"} else None
+    return None
+
+
+def _sanitize_email_css(value: str | None) -> str | None:
+    if not value or len(value) > 4096 or any(ord(char) < 0x20 and char not in "\t\r\n" for char in value):
+        return None
+    declarations: list[str] = []
+    for declaration in value.split(";")[:32]:
+        name, separator, raw_value = declaration.partition(":")
+        name = name.strip().lower()
+        if not separator or name not in _EMAIL_CSS_ALLOWLIST:
+            continue
+        parsed = _safe_email_css_value(name, raw_value)
+        if parsed is not None:
+            declarations.append(f"{name}:{parsed}")
+    return ";".join(declarations) if declarations else None
+
+
+def _safe_presentation_dimension(value: str | None, *, percent: bool = True) -> str | None:
+    if not value or len(value) > 8:
+        return None
+    candidate = value.strip().lower()
+    if candidate.isdecimal():
+        number = int(candidate)
+        return str(number) if 1 <= number <= 1200 else None
+    if percent and candidate.endswith("%") and candidate[:-1].isdecimal():
+        number = int(candidate[:-1])
+        return f"{number}%" if 1 <= number <= 100 else None
+    return None
+
+
+def _normalize_html_attrs(attrs: list[tuple[str, str | None]]) -> dict[str, str | None]:
+    """Use the browser's first-duplicate-attribute-wins semantics everywhere."""
+    values: dict[str, str | None] = {}
+    for name, value in attrs:
+        values.setdefault(name.lower(), value)
+    return values
+
+
+def _is_tiny_unlabelled_image(values: dict[str, str | None]) -> bool:
+    if (values.get("alt") or "").strip():
+        return False
+    dimensions = [values.get("width"), values.get("height")]
+    if all(value is not None and value.strip().isdecimal() and int(value.strip()) <= 1 for value in dimensions):
+        return True
+    css = _sanitize_email_css(values.get("style")) or ""
+    css_dimensions = dict(item.split(":", 1) for item in css.split(";") if ":" in item)
+    return all(css_dimensions.get(name) in {"0", "1px"} for name in ("width", "height"))
 
 
 def _safe_html_href(value: str | None) -> str | None:
@@ -373,7 +552,7 @@ def _safe_html_image_url(value: str | None) -> str | None:
 
 
 class _InertHtmlSanitizer(HTMLParser):
-    """Small fail-closed Gmail body allowlist; no source/style/resource attributes survive."""
+    """Small fail-closed Gmail body allowlist with projected presentation CSS."""
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
@@ -381,6 +560,7 @@ class _InertHtmlSanitizer(HTMLParser):
         self.open_tags: list[str] = []
         self.suppressed: list[str] = []
         self.output_size = 0
+        self.table_count = 0
 
     def _emit(self, value: str) -> None:
         if not value or self.output_size >= _HTML_MAX_OUTPUT_CHARS:
@@ -400,23 +580,40 @@ class _InertHtmlSanitizer(HTMLParser):
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         tag = tag.lower()
+        normalized_attrs = _normalize_html_attrs(attrs)
         if self.suppressed:
-            if tag in _HTML_DROP_CONTENT_TAGS:
+            if tag in _HTML_DROP_CONTENT_TAGS or tag == "table":
                 self.suppressed.append(tag)
             return
         if tag in _HTML_DROP_CONTENT_TAGS:
             self.suppressed.append(tag)
             return
         if tag == "img":
-            alt = next((value for key, value in attrs if key.lower() == "alt" and value), "")
-            src = next((value for key, value in attrs if key.lower() == "src" and value), None)
+            if _is_tiny_unlabelled_image(normalized_attrs):
+                return
+            alt = normalized_attrs.get("alt") or ""
+            src = normalized_attrs.get("src")
             safe_src = _safe_html_image_url(src)
             safe_attrs = [("alt", alt[:512])] if alt else []
+            for name in _HTML_IMAGE_ATTRIBUTES:
+                value = normalized_attrs.get(name)
+                dimension = _safe_presentation_dimension(value, percent=False)
+                if dimension:
+                    safe_attrs.append((name, dimension))
+            style = _sanitize_email_css(normalized_attrs.get("style"))
+            if style:
+                safe_attrs.append(("style", style))
             if safe_src:
                 safe_attrs.append(("data-email-src", safe_src))
             attr_text = "".join(f' {name}="{html.escape(value, quote=True)}"' for name, value in safe_attrs)
             self._emit(f"<img{attr_text}>")
             return
+        if tag == "table":
+            table_count = sum(1 for opened in self.open_tags if opened == "table")
+            if table_count >= _HTML_MAX_TABLE_DEPTH or self.table_count >= _HTML_MAX_TABLES:
+                self.suppressed.append("table")
+                return
+            self.table_count += 1
         if tag in _HTML_DROP_TAGS or tag not in _HTML_ALLOWED_TAGS:
             return
         if tag in {"p", "li", "tr"}:
@@ -426,12 +623,28 @@ class _InertHtmlSanitizer(HTMLParser):
             self._close_open("th")
         safe_attrs: list[tuple[str, str]] = []
         allowed = _HTML_ATTRIBUTE_TAGS.get(tag, frozenset())
-        for name, value in attrs:
-            name = name.lower()
-            if (name != "title" and name not in allowed) or value is None:
+        for name, value in normalized_attrs.items():
+            if (name not in allowed and name not in {"title", "style"}) or value is None:
                 continue
             value = value.strip()
-            if name == "href":
+            if name == "style":
+                value = _sanitize_email_css(value)
+                if value is None:
+                    continue
+            elif name in {"width", "height"}:
+                value = _safe_presentation_dimension(value)
+                if name == "height" and value and value.isdecimal() and int(value) > 480:
+                    value = None
+                if value is None:
+                    continue
+            elif name in {"cellpadding", "cellspacing", "border"}:
+                if not value.isdecimal() or int(value) > (32 if name != "border" else 8):
+                    continue
+            elif name == "valign":
+                value = value.lower()
+                if value not in _HTML_VERTICAL_ALIGNMENT:
+                    continue
+            elif name == "href":
                 value = _safe_html_href(value)
                 if value is None:
                     continue
@@ -932,6 +1145,34 @@ def message_detail(request: Request, message_id: MessageId, scope: ScopeText) ->
         return message
     except Exception:
         raise _provider_error() from None
+
+
+@router.post("/messages/{message_id}/read")
+def read_message_on_open(request: Request, message_id: MessageId, scope: ScopeText) -> dict[str, Any]:
+    """Mark only this opened message as read and verify the exact resulting labels."""
+    _reject_query_extras(request, {"scope"})
+    binding = _binding(scope)
+    service, _, _ = _provider_context(binding)
+    with _READ_ON_OPEN_LOCK:
+        try:
+            _, current = _get_message(service, message_id)
+            if "UNREAD" not in current["labelIds"]:
+                return {"status": "verified", "id": current["id"], "labelIds": sorted(current["labelIds"])}
+            expected = set(current["labelIds"]) - {"UNREAD"}
+            result = _execute(service.users().messages().modify(
+                userId="me", id=message_id,
+                body={"addLabelIds": [], "removeLabelIds": ["UNREAD"]},
+            ))
+            if _clean_provider_text(result.get("id"), 256) != message_id:
+                raise ValueError("invalid read-on-open result identity")
+            _, verified = _get_message(service, message_id)
+            if verified["id"] != message_id or set(verified["labelIds"]) != expected:
+                raise ValueError("read-on-open label readback mismatch")
+            return {"status": "verified", "id": verified["id"], "labelIds": sorted(verified["labelIds"])}
+        except HTTPException:
+            raise
+        except Exception:
+            raise _provider_error(mutation_started=True) from None
 
 
 @router.get("/threads/{thread_id}")
