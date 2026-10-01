@@ -36,8 +36,8 @@ const EMAIL_STYLES = {
   blockquote: { margin: '8px 0', paddingLeft: '12px', borderLeft: '3px solid var(--ui-stroke-secondary)' },
   p: { margin: '0.25rem 0' },
   table: { borderCollapse: 'collapse', maxWidth: '100%', boxSizing: 'border-box' },
-  td: { border: '1px solid var(--ui-stroke-secondary)', padding: '4px 8px', textAlign: 'left', verticalAlign: 'top' },
-  th: { border: '1px solid var(--ui-stroke-secondary)', padding: '4px 8px', textAlign: 'left', verticalAlign: 'top' },
+  td: { textAlign: 'left', verticalAlign: 'top' },
+  th: { textAlign: 'left', verticalAlign: 'top' },
   pre: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }
 }
 const EMAIL_STYLE_PROPERTIES = new Set([

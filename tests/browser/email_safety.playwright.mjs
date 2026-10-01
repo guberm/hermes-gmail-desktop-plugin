@@ -146,6 +146,54 @@ page.on('request', request => { if (request.resourceType() === 'image') allRemot
   await page.getByRole('button', { name: 'Hide images' }).click()
   assert.equal(await page.locator('img').count(), 0, 'hide disables all remote image sources again')
 
+  const logoTiles = '<table width="640" style="width:640px"><tbody>' +
+    '<tr><td colspan="3"><table width="100%" cellspacing="8" cellpadding="4"><tbody><tr>' +
+    '<td width="48"><img data-email-src="https://images.example.test/tile-a.png" width="48" height="48" alt="Tile A">Tile A</td>' +
+    '<td width="48"><img data-email-src="https://images.example.test/tile-b.png" width="48" height="48" alt="Tile B">Tile B</td>' +
+    '<td width="48"><img data-email-src="https://images.example.test/tile-c.png" width="48" height="48" alt="Tile C">Tile C</td>' +
+    '</tr></tbody></table></td></tr>' +
+    '<tr><td colspan="3">&nbsp;</td></tr>' +
+    '<tr><td colspan="3"><hr></td></tr>' +
+    '</tbody></table>'
+  const rewardsNewsletter = '<table width="680" style="width:680px"><tbody>' +
+    '<tr><td colspan="2" style="padding:12px 16px;font-size:20px;font-weight:bold">Blue Rewards</td></tr>' +
+    '<tr><td width="260"><img data-email-src="https://images.example.test/hero.png" width="640" height="240" alt="Rewards hero"></td>' +
+    '<td width="420" style="padding:16px;border-bottom:1px solid #ccc;line-height:1.5">A synthetic newsletter offer with readable copy and an intentional separator.</td></tr>' +
+    '</tbody></table>'
+  for (const [label, markup, imageCount] of [
+    ['nested logo tile grid', logoTiles, 3],
+    ['newsletter hero and copy', rewardsNewsletter, 1]
+  ]) {
+    for (const viewport of [{ width: 360, height: 800 }, { width: 1200, height: 900 }]) {
+      await page.setViewportSize(viewport)
+      await page.evaluate(value => window.GmailEmailHarness.mountEmail(value), markup)
+      const loadImages = page.getByRole('button', { name: `Load images (${imageCount})` })
+      await loadImages.waitFor()
+      await page.waitForFunction(() => document.querySelector('#root table'))
+      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true, `${label} has no horizontal overflow at ${viewport.width}px`)
+      assert.equal(await page.locator('#root table').evaluateAll(tables => tables.every(el => el.getBoundingClientRect().width <= el.parentElement.getBoundingClientRect().width + 1)), true, `${label} nested tables fit their pane at ${viewport.width}px`)
+      assert.equal(await page.locator('#root td').evaluateAll(cells => cells.every(cell => cell.getBoundingClientRect().width <= cell.parentElement.getBoundingClientRect().width + 1)), true, `${label} cells stay within their rows at ${viewport.width}px`)
+      if (viewport.width === 360) {
+        assert.equal(await page.locator('#root td').first().evaluate(el => getComputedStyle(el).borderTopWidth), '0px', `${label} has no synthetic cell-outline borders`)
+        assert.equal(await page.locator('#root td').evaluateAll(cells => cells.filter(cell => !String(cell.getAttribute('style') || '').includes('padding') && !cell.closest('table')?.hasAttribute('cellpadding')).every(cell => Number.parseFloat(getComputedStyle(cell).paddingTop) <= 1)), true, `${label} has no Hermes-added padding on cells without authored padding`)
+      } else {
+        assert.equal(await page.locator('#root tr').first().evaluate(el => getComputedStyle(el).display), 'table-row', `${label} preserves desktop table layout`)
+      }
+      if (label === 'newsletter hero and copy') {
+        assert.equal(await page.locator('#root td').last().evaluate(el => getComputedStyle(el).borderBottomStyle), 'solid', 'intentional newsletter divider survives projection')
+        assert.equal(await page.locator('#root td').last().evaluate(el => getComputedStyle(el).paddingTop), '16px', 'intentional newsletter padding survives projection')
+        assert.match(await page.locator('#root').innerText(), /Blue Rewards[\s\S]*synthetic newsletter offer/, 'hero and copy remain readable text')
+      }
+      await loadImages.click()
+      await page.locator('#root img').first().waitFor()
+      assert.equal(await page.locator('#root img').evaluateAll(images => images.every(image => image.getBoundingClientRect().width <= image.parentElement.getBoundingClientRect().width + 1)), true, `${label} images fit their responsive cells at ${viewport.width}px`)
+      if (viewport.width === 360) {
+        assert.equal(await page.locator('#root hr').count(), label === 'nested logo tile grid' ? 1 : 0, `${label} preserves intentional dividers without inferring empty-row semantics`)
+        assert.ok((await page.locator('#root').evaluate(el => el.getBoundingClientRect().height)) < 700, `${label} content height is bounded at 360px`)
+      }
+    }
+  }
+
   for (const viewport of [{ width: 360, height: 800 }, { width: 1200, height: 900 }]) {
     await page.setViewportSize(viewport)
     await page.evaluate(markup => window.GmailEmailHarness.mountEmail(markup), reportedHtml)
@@ -158,6 +206,7 @@ page.on('request', request => { if (request.resourceType() === 'image') allRemot
   imageReferrers.length = 0
   const mailbox = await page.evaluate(() => { window.GmailEmailHarness.mountMailbox(); return true })
   await page.getByRole('button', { name: /Synthetic message 1/ }).waitFor()
+  assert.deepEqual(pageErrors, [], 'synthetic mailbox mount has no React errors')
   assert.equal(await page.evaluate(() => window.GmailEmailHarness.mailbox().calls.some(call => call.path.includes('/read'))), false, 'list render does not mark mail read')
   await page.getByRole('button', { name: /Synthetic message 1/ }).click()
   await page.getByRole('button', { name: /Load images \(1\)/ }).waitFor()

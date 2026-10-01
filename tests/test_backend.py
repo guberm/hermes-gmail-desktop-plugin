@@ -333,6 +333,36 @@ class BackendTests(unittest.TestCase):
         self.assertIn('padding:8px 12px', safe)
         self.assertIn('margin:8px auto', safe)
 
+    def test_nested_newsletter_table_projection_preserves_safe_geometry_and_author_styles(self):
+        safe = api.sanitize_email_html(
+            '<table width="640" border="999" cellspacing="999" cellpadding="999">'
+            '<tr><td width="50%" style="padding:8px 12px">'
+            '<table width="100%" border="1" cellspacing="9" cellpadding="7">'
+            '<tr><td width="48"><img width="48" height="48" '
+            'src="https://images.example.test/logo.png" alt="Brand"></td>'
+            '<td width="50%" style="border-bottom:1px solid #ccc">Offer</td></tr>'
+            '<tr height="300"><td colspan="2"> \n &nbsp; </td></tr>'
+            '<tr><td colspan="2"><hr></td></tr>'
+            '</table></td><td width="50%">Newsletter copy</td></tr>'
+            '<tr><td> \t </td></tr>'
+            '</table>'
+        )
+        self.assertIn('width="640"', safe)
+        self.assertIn('width="100%"', safe)
+        self.assertIn('width="50%"', safe)
+        self.assertIn('width="48"', safe)
+        self.assertIn('border="1"', safe)
+        self.assertIn('cellspacing="9"', safe)
+        self.assertIn('cellpadding="7"', safe)
+        self.assertNotIn('border="999"', safe, 'untrusted oversized table borders are rejected')
+        self.assertNotIn('cellspacing="999"', safe, 'untrusted oversized spacing is rejected')
+        self.assertNotIn('cellpadding="999"', safe, 'untrusted oversized padding is rejected')
+        self.assertIn('data-email-src="https://images.example.test/logo.png"', safe)
+        self.assertIn('border-bottom:1px solid #ccc', safe, 'an explicit sanitized separator remains intentional')
+        self.assertIn('padding:8px 12px', safe, 'explicit author cell padding is retained')
+        self.assertIn('Newsletter copy', safe)
+        self.assertEqual(safe.count('<tr'), 5, 'nested and blank source rows are preserved; layout is not guessed from empty text')
+
     def test_read_on_open_removes_only_unread_and_verifies_backend_readback(self):
         scope = self.status()['scope']
         fake = self.services[str(self.a)]
