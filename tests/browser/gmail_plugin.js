@@ -102,7 +102,11 @@ function emailNode(node, key, imagesEnabled, ctx) {
       }
     }
   }
-  return jsx(tag, { ...props, style: EMAIL_STYLES[tag], children: [...node.childNodes].map((child, index) => emailNode(child, `${key}.${index}`, imagesEnabled, ctx)) }, key)
+  const elementProps = { ...props, style: EMAIL_STYLES[tag] }
+  // HTML void tags have no children; React throws #137 if an empty children
+  // prop is passed for <br> or <hr> from untrusted email markup.
+  if (tag === 'br' || tag === 'hr') return jsx(tag, elementProps, key)
+  return jsx(tag, { ...elementProps, children: [...node.childNodes].map((child, index) => emailNode(child, `${key}.${index}`, imagesEnabled, ctx)) }, key)
 }
 
 export function EmailBody({ markup, ctx }) {

@@ -51,8 +51,18 @@ try {
       return route.fulfill({ status: 200, contentType: 'text/javascript', body: javascript })
     return route.fulfill({ status: 200, contentType: 'text/html', body: '<!doctype html><html><body><div id="root"></div><script type="module" src="/harness.js"></script></body></html>' })
   })
+  const pageErrors = []
+  page.on('pageerror', error => pageErrors.push(error.message))
   await page.goto('http://localhost/')
   await page.waitForFunction(() => !!window.GmailEmailHarness)
+
+  const formattedMarkup = '<p>first line<br>second<br>third<hr>fourth</p>'
+  await page.evaluate(markup => window.GmailEmailHarness.mountEmail(markup), formattedMarkup)
+  await page.waitForTimeout(50)
+  assert.deepEqual(pageErrors, [], 'realistic email void elements render without React errors')
+  assert.equal(await page.locator('br').count(), 2, 'email line breaks render')
+  assert.equal(await page.locator('hr').count(), 1, 'email horizontal rule renders')
+  assert.equal(await page.locator('#root').innerText(), 'first line\nsecond\nthird\n\nfourth')
 
   const imageMarkup = '<p>Photo:</p><img data-email-src="https://images.example.test/a.png" alt="remote photo">'
   await page.evaluate(markup => window.GmailEmailHarness.mountEmail(markup), imageMarkup)

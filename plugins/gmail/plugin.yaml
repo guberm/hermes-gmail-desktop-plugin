@@ -1,5 +1,5 @@
 name: gmail
-version: 1.0.7
+version: 1.0.8
 description: Gmail mailbox with confirmed actions, privacy-gated images, safe clickable email links, and formatted email display in Hermes Desktop.
 manifest_version: 1
 kind: standalone
