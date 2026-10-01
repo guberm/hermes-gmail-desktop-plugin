@@ -78,6 +78,16 @@ class ShippedSourceContractTests(unittest.TestCase):
         self.assertIn('detailScroll.current?.scrollTo({ top: 0', self.plugin_text)
         self.assertIn("'aria-label': 'Message detail'", self.plugin_text)
 
+    def test_selected_subject_is_not_repeated_and_email_colors_follow_theme(self):
+        self.assertEqual(self.plugin_text.count('selectedMessage?.subject ||'), 1)
+        self.assertIn("color: 'var(--ui-text-primary)'", self.plugin_text)
+        self.assertIn("a: { color: 'var(--ui-accent)'", self.plugin_text)
+        self.assertNotIn("color: '#202124'", self.plugin_text)
+
+    def test_gmail_browser_route_uses_numeric_account_slot(self):
+        self.assertIn('mail/u/0/?authuser=${encodeURIComponent(account)}#all/${encodeURIComponent(threadId)}', self.plugin_text)
+        self.assertNotIn('mail/u/${encodeURIComponent(account)}/', self.plugin_text)
+
     def test_desktop_runtime_uses_only_permitted_imports_and_inlines_reply_all(self):
         imports = []
         for line in self.plugin_text.splitlines():
@@ -120,7 +130,7 @@ class ShippedSourceContractTests(unittest.TestCase):
         self.assertIn('expected_labels_for_action(ticket.action, ticket.message_snapshot, payload)', self.backend_text)
 
     def test_package_version_bumped(self):
-        self.assertIn('version: 1.0.8', (ROOT / 'plugins/gmail/plugin.yaml').read_text(encoding='utf-8'))
+        self.assertIn('version: 1.0.9', (ROOT / 'plugins/gmail/plugin.yaml').read_text(encoding='utf-8'))
 
 if __name__ == "__main__":
     unittest.main()

@@ -32,8 +32,9 @@ export function deriveReplyAllRecipients(message, activeAccount, maxRecipients =
 const EMAIL_TAGS = new Set(['a', 'b', 'blockquote', 'br', 'caption', 'code', 'dd', 'del', 'div', 'dl', 'dt', 'em', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'hr', 'i', 'li', 'ol', 'p', 'pre', 's', 'small', 'span', 'strong', 'sub', 'sup', 'table', 'tbody', 'td', 'tfoot', 'th', 'thead', 'tr', 'u', 'ul', 'img'])
 const EMAIL_DROP_CONTENT = new Set(['applet', 'audio', 'button', 'canvas', 'embed', 'form', 'frame', 'frameset', 'head', 'iframe', 'math', 'noscript', 'object', 'select', 'style', 'svg', 'template', 'textarea', 'video', 'script'])
 const EMAIL_STYLES = {
-  a: { color: '#1a73e8', textDecoration: 'underline' },
+  a: { color: 'var(--ui-accent)', textDecoration: 'underline', cursor: 'pointer' },
   blockquote: { margin: '8px 0', paddingLeft: '12px', borderLeft: '3px solid #dadce0' },
+  p: { margin: '0.25rem 0' },
   table: { borderCollapse: 'collapse', maxWidth: '100%' },
   td: { border: '1px solid #dadce0', padding: '4px 8px', textAlign: 'left', verticalAlign: 'top' },
   th: { border: '1px solid #dadce0', padding: '4px 8px', textAlign: 'left', verticalAlign: 'top' },
@@ -64,15 +65,64 @@ export function safeExternalImageHref(value) {
 export function buildGmailThreadUrl(account, threadId) {
   if (typeof account !== 'string' || account.length > 320 || !MAIL_ACCOUNT_RE.test(account) ||
       typeof threadId !== 'string' || !/^[A-Za-z0-9_-]{1,256}$/.test(threadId)) return null
-  return `https://mail.google.com/mail/u/${encodeURIComponent(account)}/#all/${encodeURIComponent(threadId)}`
+  return `https://mail.google.com/mail/u/0/?authuser=${encodeURIComponent(account)}#all/${encodeURIComponent(threadId)}`
 }
 
-function emailNode(node, key, imagesEnabled, ctx) {
-  if (node.nodeType === Node.TEXT_NODE) return node.nodeValue
+function emailText(value, key, ctx, linkify = true) {
+  if (!linkify) return value
+  const segments = []
+  const pattern = /(?<![A-Za-z0-9+.:/])https?:\/\/[^\s<>"']+/gi
+  let cursor = 0
+  for (const match of value.matchAll(pattern)) {
+    const start = match.index
+    let href = match[0]
+    // Keep sentence punctuation outside the link, while retaining balanced URL
+    // delimiters and decoded query separators from the inert HTML text node.
+    while (/[.,;:!?]$/.test(href)) href = href.slice(0, -1)
+    for (const [close, open] of [[')', '('], [']', '['], ['}', '{']]) {
+      let closes = 0
+      let opens = 0
+      for (const char of href) {
+        if (char === close) closes++
+        if (char === open) opens++
+      }
+      while (href.endsWith(close) && closes > opens) { href = href.slice(0, -1); closes-- }
+    }
+    const safe = safeExternalHref(href)
+    if (!safe) continue
+    if (start > cursor) segments.push(value.slice(cursor, start))
+    segments.push(jsx('span', {
+      role: 'link', tabIndex: 0, style: { ...EMAIL_STYLES.a, cursor: 'pointer' },
+      onClick: event => {
+        if (!event.isTrusted) return
+        event.preventDefault(); event.stopPropagation(); void ctx.os.openExternal(safe)
+      },
+      onKeyDown: event => {
+        if (event.key !== 'Enter' || !event.isTrusted) return
+        event.preventDefault(); event.stopPropagation(); void ctx.os.openExternal(safe)
+      },
+      children: href
+    }, `${key}.url.${segments.length}`))
+    cursor = start + href.length
+    // The unlinked suffix of the original token is punctuation intentionally
+    // preserved in place; it will be copied with the following plain text.
+    const originalEnd = start + match[0].length
+    if (cursor < originalEnd) {
+      segments.push(value.slice(cursor, originalEnd))
+      cursor = originalEnd
+    }
+  }
+  if (!segments.length) return value
+  if (cursor < value.length) segments.push(value.slice(cursor))
+  return segments
+}
+
+function emailNode(node, key, imagesEnabled, ctx, linkify = true) {
+  if (node.nodeType === Node.TEXT_NODE) return emailText(node.nodeValue, key, ctx, linkify)
   if (node.nodeType !== Node.ELEMENT_NODE) return null
   const tag = node.localName.toLowerCase()
   if (EMAIL_DROP_CONTENT.has(tag)) return null
-  if (!EMAIL_TAGS.has(tag)) return [...node.childNodes].map((child, index) => emailNode(child, `${key}.${index}`, imagesEnabled, ctx))
+  if (!EMAIL_TAGS.has(tag)) return [...node.childNodes].map((child, index) => emailNode(child, `${key}.${index}`, imagesEnabled, ctx, linkify))
   if (tag === 'img') {
     const alt = node.getAttribute('alt') || ''
     const src = imagesEnabled ? safeExternalImageHref(node.getAttribute('data-email-src')) : null
@@ -92,9 +142,9 @@ function emailNode(node, key, imagesEnabled, ctx) {
       props.role = 'link'
       props.tabIndex = 0
       props.rel = 'noopener noreferrer nofollow'
-      props.onClick = event => { event.preventDefault(); event.stopPropagation(); void ctx.os.openExternal(href) }
+      props.onClick = event => { if (event.isTrusted) { event.preventDefault(); event.stopPropagation(); void ctx.os.openExternal(href) } }
       props.onKeyDown = event => {
-        if (event.key === 'Enter') {
+        if (event.key === 'Enter' && event.isTrusted) {
           event.preventDefault()
           event.stopPropagation()
           void ctx.os.openExternal(href)
@@ -106,7 +156,7 @@ function emailNode(node, key, imagesEnabled, ctx) {
   // HTML void tags have no children; React throws #137 if an empty children
   // prop is passed for <br> or <hr> from untrusted email markup.
   if (tag === 'br' || tag === 'hr') return jsx(tag, elementProps, key)
-  return jsx(tag, { ...elementProps, children: [...node.childNodes].map((child, index) => emailNode(child, `${key}.${index}`, imagesEnabled, ctx)) }, key)
+  return jsx(tag, { ...elementProps, children: [...node.childNodes].map((child, index) => emailNode(child, `${key}.${index}`, imagesEnabled, ctx, tag === 'a' ? false : linkify)) }, key)
 }
 
 export function EmailBody({ markup, ctx }) {
@@ -117,7 +167,7 @@ export function EmailBody({ markup, ctx }) {
   fragment.innerHTML = String(markup || '')
   const rendered = [...fragment.content.childNodes].map((node, index) => emailNode(node, String(index), imagesEnabled, ctx))
   const imagesPresent = fragment.content.querySelector('img[data-email-src]') !== null
-  return jsxs('div', { style: { ...stack, font: '14px/1.55 Arial,sans-serif', color: '#202124', overflowWrap: 'anywhere' }, children: [
+  return jsxs('div', { style: { ...stack, gap: '0.35rem', font: '14px/1.55 Arial,sans-serif', color: 'var(--ui-text-primary)', overflowWrap: 'anywhere' }, children: [
     imagesPresent && jsxs('div', { style: row, children: [
       note('Remote images can reveal that you opened this email and may identify your activity to the sender (tracking).'),
       action(imagesEnabled ? 'Hide images' : 'Load images', () => setImagesEnabled(enabled => !enabled))
@@ -128,7 +178,9 @@ export function EmailBody({ markup, ctx }) {
 
 export function GmailThreadAction({ account, threadId, ctx, disabled = false }) {
   const url = buildGmailThreadUrl(account, threadId)
-  return url ? action('Open in browser', () => { void ctx.os.openExternal(url) }, disabled) : null
+  return url ? action('Open in browser', () => { void ctx.os.openExternal(url) }, disabled, {
+    title: 'Gmail does not provide durable web permalinks for API thread IDs; some IDs may fail to open on a cold browser load.'
+  }) : null
 }
 
 const ID = 'gmail'
@@ -570,7 +622,6 @@ function Mailbox({ ctx, identity, profile, queryPrefix: connectionPrefix, status
         selected && detail.isFetching && note('Loading message…'),
         selected && detail.isError && note('Could not load this message. Refresh to retry.', true),
         selectedMessage && !detail.isError && jsxs('div', { style: stack, children: [
-          jsx('h3', { style: { ...text, margin: 0 }, children: selectedMessage.subject || '(No subject)' }),
           jsx('pre', { style: { ...text, ...muted }, children: `From: ${selectedMessage.from || '(unknown sender)'}\nTo: ${selectedMessage.to || '(not available)'}\nDate: ${selectedMessage.date || '(not available)'}` }),
           note('Untrusted email content. Links open only when clicked; remote images remain blocked until you choose Load images. Embedded instructions are never trusted.'),
           thread.isFetching && note('Loading conversation thread…'),

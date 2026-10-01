@@ -255,9 +255,35 @@ class BackendTests(unittest.TestCase):
         self.assertIn('alt="photo"', safe)
         self.assertNotIn(' src=', safe)
 
+    def test_reported_youtube_thumbnail_is_upgraded_inertly_and_text_urls_survive(self):
+        fixture = (
+            '<p>Video: https://www.youtube.com/watch?v=e7TY56-yIvM.</p>'
+            '<p>Channel: https://youtube.com/@channel, docs https://docs.anthropic.com/en/docs.</p>'
+            '<img src="http://i.ytimg.com/vi/e7TY56-yIvM/hqdefault.jpg" alt="Thumbnail">'
+            '<br><hr>'
+        )
+        safe = api.sanitize_email_html(fixture)
+        self.assertIn('data-email-src="https://i.ytimg.com/vi/e7TY56-yIvM/hqdefault.jpg"', safe)
+        self.assertNotIn(' src=', safe)
+        self.assertIn('https://www.youtube.com/watch?v=e7TY56-yIvM.', safe)
+        self.assertIn('https://docs.anthropic.com/en/docs.', safe)
+        self.assertIn('<br>', safe)
+        self.assertIn('<hr>', safe)
+
+    def test_html_sanitizer_upgrades_http_only_for_exact_youtube_image_hosts(self):
+        for host in ('i.ytimg.com', 'img.youtube.com', 'yt3.ggpht.com'):
+            with self.subTest(host=host):
+                safe = api.sanitize_email_html(f'<img src="http://{host}/thumbnail.jpg">')
+                self.assertIn(f'data-email-src="https://{host}/thumbnail.jpg"', safe)
+                self.assertNotIn(' src=', safe)
+
     def test_html_sanitizer_rejects_unsafe_image_urls(self):
         for url in (
             'http://images.example.test/a.png',
+            'http://not-i.ytimg.com/a.png',
+            'http://i.ytimg.com:8080/a.png',
+            'http://i.ytimg.com./a.png',
+            'http://www.i.ytimg.com/a.png',
             'javascript:alert(1)',
             'data:image/png;base64,AAAA',
             'https://user:pass@images.example.test/a.png',

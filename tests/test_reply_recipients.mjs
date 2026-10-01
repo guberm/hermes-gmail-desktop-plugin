@@ -48,7 +48,7 @@ test('reply all rejects a message with no recipient after account exclusion', ()
 
 test('Gmail thread URL encodes verified account and backend thread id', () => {
   assert.equal(buildGmailThreadUrl('user+alias@example.com', 'thread-123_abc'),
-    'https://mail.google.com/mail/u/user%2Balias%40example.com/#all/thread-123_abc')
+    'https://mail.google.com/mail/u/0/?authuser=user%2Balias%40example.com#all/thread-123_abc')
   assert.equal(buildGmailThreadUrl('not an email', 'thread-123'), null)
   assert.equal(buildGmailThreadUrl('user@example.com', 'bad/thread'), null)
 })

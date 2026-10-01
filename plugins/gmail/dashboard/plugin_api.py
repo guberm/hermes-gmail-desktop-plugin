@@ -19,7 +19,7 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from email import policy
 from email.message import EmailMessage
-from urllib.parse import unquote, urlsplit
+from urllib.parse import unquote, urlsplit, urlunsplit
 
 from html.parser import HTMLParser
 from pathlib import Path
@@ -357,7 +357,17 @@ def _safe_html_image_url(value: str | None) -> str | None:
     if candidate is None:
         return None
     try:
-        return candidate if urlsplit(candidate).scheme.lower() == "https" else None
+        parsed = urlsplit(candidate)
+        if parsed.scheme.lower() == "https":
+            return candidate
+        trusted_http_image_hosts = {"i.ytimg.com", "img.youtube.com", "yt3.ggpht.com"}
+        if parsed.scheme.lower() != "http" or not parsed.hostname or parsed.hostname.lower() not in trusted_http_image_hosts:
+            return None
+        # Upgrade only the exact allowlisted host: credentials, explicit ports,
+        # suffix lookalikes and other HTTP origins remain blocked.
+        if parsed.username is not None or parsed.password is not None or parsed.port is not None or parsed.netloc.lower() != parsed.hostname.lower():
+            return None
+        return urlunsplit(("https", parsed.hostname.lower(), parsed.path, parsed.query, parsed.fragment))
     except ValueError:
         return None
 
