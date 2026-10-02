@@ -1,5 +1,5 @@
 name: gmail
-version: 1.0.11
+version: 1.0.12
 description: Gmail mailbox with profile-bound read-on-open, privacy-gated images, responsive safe email rendering, and reviewed mailbox actions.
 manifest_version: 1
 kind: standalone

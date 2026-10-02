@@ -208,6 +208,217 @@ page.on('request', request => { if (request.resourceType() === 'image') allRemot
   await page.getByRole('button', { name: /Synthetic message 1/ }).waitFor()
   assert.deepEqual(pageErrors, [], 'synthetic mailbox mount has no React errors')
   assert.equal(await page.evaluate(() => window.GmailEmailHarness.mailbox().calls.some(call => call.path.includes('/read'))), false, 'list render does not mark mail read')
+
+  const m2Card = page.locator('article').filter({ hasText: 'Synthetic message 2' })
+  const markM2Read = m2Card.getByRole('button', { name: 'Mark as read' })
+  assert.equal(await markM2Read.count(), 1, 'unread cards expose an accessible Mark as read action')
+  assert.deepEqual(await page.evaluate(() => window.GmailEmailHarness.mailbox().labels.m2), ['INBOX', 'UNREAD', 'IMPORTANT'], 'card actions have no implicit mutation')
+  await markM2Read.focus()
+  await markM2Read.press('Enter')
+  const readPreview = page.getByLabel('Exact action preview')
+  await readPreview.waitFor()
+  const reviewedRead = JSON.parse(await readPreview.textContent())
+  assert.equal(reviewedRead.action, 'labels')
+  assert.equal(reviewedRead.message.id, 'm2')
+  assert.deepEqual(reviewedRead.removeLabelIds, ['UNREAD'])
+  assert.deepEqual(await page.evaluate(() => window.GmailEmailHarness.mailbox().labels.m2), ['INBOX', 'UNREAD', 'IMPORTANT'], 'mark-read is unchanged until explicit confirmation')
+  const readPrepare = await page.evaluate(() => window.GmailEmailHarness.mailbox().calls.find(call => call.path === '/actions/prepare'))
+  assert.deepEqual(readPrepare.body, { scope: 'synthetic_scope_12345678901234567890', action: 'labels', messageId: 'm2', addLabelIds: [], removeLabelIds: ['UNREAD'] }, 'Mark as read prepares the exact card message and only UNREAD removal')
+  await page.getByRole('button', { name: 'Confirm action' }).click()
+  await page.waitForFunction(() => !window.GmailEmailHarness.mailbox().labels.m2.includes('UNREAD'))
+  await page.waitForFunction(() => !document.querySelector('article')?.innerText.includes('Synthetic message 2') ||
+    ![...document.querySelectorAll('article')].find(card => card.innerText.includes('Synthetic message 2'))?.querySelector('button[aria-label="Mark as read"]'))
+  assert.deepEqual(await page.evaluate(() => window.GmailEmailHarness.mailbox().labels.m2), ['INBOX', 'IMPORTANT'], 'verified read removes only UNREAD and preserves other labels')
+  assert.deepEqual(await page.evaluate(() => window.GmailEmailHarness.mailbox().labels.m1), ['INBOX', 'UNREAD', 'STARRED'], 'marking m2 read does not change m1')
+  await m2Card.getByText('Read', { exact: true }).waitFor()
+  assert.equal(await m2Card.getByText('Read', { exact: true }).count(), 1, 'verified mark-read updates the card status')
+  assert.equal(await m2Card.getByRole('button', { name: 'Mark as read' }).count(), 0, 'read card no longer offers Mark as read')
+  const focusAfterRead = await page.evaluate(() => ({ tag: document.activeElement?.tagName, text: document.activeElement?.textContent?.trim(), role: document.activeElement?.getAttribute('role'), cls: document.activeElement?.className, label: document.activeElement?.getAttribute('aria-label') }))
+  assert.equal(await m2Card.getByRole('button', { name: /Star/ }).evaluate(button => button === document.activeElement), true,
+    `when Mark as read disappears, keyboard focus moves to a remaining m2 action; active=${JSON.stringify(focusAfterRead)}`)
+  const refreshButton = page.getByRole('button', { name: 'Refresh' })
+  const snippetBeforeRefresh = await m2Card.getByText(/^Privacy-safe fixture/).textContent()
+  await refreshButton.focus()
+  await refreshButton.click()
+  assert.equal(await page.evaluate(() => document.activeElement?.textContent?.trim()), 'Refresh', 'Refresh owns focus before the result update')
+  await page.waitForFunction(previous => {
+    const card = [...document.querySelectorAll('article')].find(item => item.innerText.includes('Synthetic message 2'))
+    const snippet = [...(card?.querySelectorAll('span') || [])].map(item => item.textContent).find(value => value.startsWith('Privacy-safe fixture'))
+    return !!snippet && snippet !== previous
+  }, snippetBeforeRefresh)
+  assert.equal(await page.evaluate(() => document.activeElement?.textContent?.trim()), 'Refresh',
+    'a later active search-result refetch does not steal focus back to the completed card')
+  const readCommit = await page.evaluate(() => window.GmailEmailHarness.mailbox().calls.find(call => call.path === '/actions/commit'))
+  assert.deepEqual(readCommit.body, { scope: 'synthetic_scope_12345678901234567890', confirmationToken: 'synthetic-ticket-1', confirmed: true }, 'read mutation commits only the reviewed authenticated ticket')
+  assert.equal(await page.evaluate(() => window.GmailEmailHarness.mailbox().calls.filter(call => call.path === '/actions/commit').length), 1, 'clicking Mark as read twice while busy cannot double-dispatch')
+
+  await page.evaluate(() => window.GmailEmailHarness.mountMailbox({ deferredActionPrepare: true }))
+  const pendingM2Read = page.locator('article').filter({ hasText: 'Synthetic message 2' }).getByRole('button', { name: 'Mark as read' })
+  await pendingM2Read.click()
+  await page.waitForFunction(() => window.GmailEmailHarness.mailbox().pendingActionPrepare.has('m2'))
+  assert.equal(await page.getByRole('button', { name: 'Delete' }).first().isDisabled(), true, 'all card actions disable while a reviewed action is pending')
+  assert.match(await page.getByRole('status').filter({ hasText: 'Preparing or verifying' }).textContent(), /Preparing or verifying/, 'pending work is announced to assistive technology')
+  assert.equal(await page.evaluate(() => window.GmailEmailHarness.mailbox().labels.m2.includes('UNREAD')), true, 'pending prepare performs no implicit label mutation')
+  assert.equal(await page.evaluate(() => window.GmailEmailHarness.resolveActionPrepare('m2')), true)
+  await page.getByLabel('Exact action preview').waitFor()
+  await page.getByRole('button', { name: 'Cancel' }).click()
+  assert.equal(await page.evaluate(() => window.GmailEmailHarness.mailbox().labels.m2.includes('UNREAD')), true, 'cancel leaves pending message unread')
+
+  await page.evaluate(() => window.GmailEmailHarness.mountMailbox({ failActionPrepare: true }))
+  const failedPrepareRead = page.locator('article').filter({ hasText: 'Synthetic message 2' }).getByRole('button', { name: 'Mark as read' })
+  await failedPrepareRead.click()
+  await page.getByRole('alert').filter({ hasText: 'Could not prepare this message action' }).waitFor()
+  assert.equal(await page.evaluate(() => window.GmailEmailHarness.mailbox().labels.m2.includes('UNREAD')), true, 'failed prepare does not change labels')
+  assert.equal(await page.getByLabel('Exact action preview').textContent(), '', 'failed prepare does not show an unverified ticket')
+
+  await page.evaluate(() => window.GmailEmailHarness.mountMailbox())
+  const deleteM2 = page.locator('article').filter({ hasText: 'Synthetic message 2' }).getByRole('button', { name: 'Delete' })
+  await deleteM2.click()
+  await page.waitForFunction(() => {
+    const preview = document.querySelector('[aria-label="Exact action preview"]')
+    try { return JSON.parse(preview?.textContent || '').action === 'trash' } catch { return false }
+  })
+  const trashPreview = page.getByLabel('Exact action preview')
+  const reviewedTrash = JSON.parse(await trashPreview.textContent())
+  assert.equal(reviewedTrash.action, 'trash')
+  assert.equal(reviewedTrash.message.id, 'm2')
+  assert.match(reviewedTrash.effect, /move this message to Trash/i, 'Delete preview explicitly promises move to Trash')
+  assert.deepEqual(await page.evaluate(() => window.GmailEmailHarness.mailbox().labels.m2), ['INBOX', 'UNREAD', 'IMPORTANT'], 'delete leaves message unchanged until confirmation')
+  await page.getByRole('button', { name: 'Confirm action' }).click()
+  await page.waitForFunction(() => ![...document.querySelectorAll('article')].find(card => card.innerText.includes('Synthetic message 2')))
+  assert.deepEqual(await page.evaluate(() => window.GmailEmailHarness.mailbox().labels.m2), ['UNREAD', 'IMPORTANT', 'TRASH'], 'verified Delete moves m2 to Trash and removes only INBOX')
+  assert.deepEqual(await page.evaluate(() => window.GmailEmailHarness.mailbox().labels.m1), ['INBOX', 'UNREAD', 'STARRED'], 'deleting m2 leaves m1 unchanged')
+  const trashPrepare = await page.evaluate(() => window.GmailEmailHarness.mailbox().calls.find(call => call.path === '/actions/prepare' && call.body.action === 'trash'))
+  assert.equal(trashPrepare.body.messageId, 'm2', 'Delete targets the exact card id')
+  const trashCommit = await page.evaluate(() => window.GmailEmailHarness.mailbox().calls.find(call => call.path === '/actions/commit' && call.body.confirmationToken === 'synthetic-ticket-1'))
+  assert.deepEqual(trashCommit.body, { scope: 'synthetic_scope_12345678901234567890', confirmationToken: 'synthetic-ticket-1', confirmed: true }, 'Delete commits its reviewed ticket')
+
+  await page.evaluate(() => window.GmailEmailHarness.mountMailbox())
+  await page.getByRole('button', { name: /Synthetic message 1/ }).waitFor()
+  await page.getByRole('button', { name: /Synthetic message 1/ }).click()
+  await page.getByRole('button', { name: /← Inbox/ }).waitFor()
+  const openM1DeleteM2 = page.locator('article').filter({ hasText: 'Synthetic message 2' }).getByRole('button', { name: 'Delete' })
+  await openM1DeleteM2.click()
+  await page.getByLabel('Exact action preview').waitFor()
+  assert.equal(await page.getByRole('button', { name: /← Inbox/ }).count(), 1, 'another message stays open while reviewing this card action')
+  await page.getByRole('button', { name: 'Confirm action' }).click()
+  await page.waitForFunction(() => window.GmailEmailHarness.mailbox().labels.m2.includes('TRASH'))
+  assert.equal(await page.getByRole('button', { name: /← Inbox/ }).count(), 1, 'trashing m2 does not close unrelated open m1 detail')
+  assert.equal(await page.getByRole('heading', { name: 'Synthetic message 1' }).count(), 1, 'unrelated m1 remains the selected detail')
+
+  await page.evaluate(() => window.GmailEmailHarness.mountMailbox({ staleActionCommit: true }))
+  const staleM2Delete = page.locator('article').filter({ hasText: 'Synthetic message 2' }).getByRole('button', { name: 'Delete' })
+  await staleM2Delete.click()
+  await page.getByLabel('Exact action preview').waitFor()
+  await page.getByRole('button', { name: 'Confirm action' }).click()
+  await page.getByRole('alert').filter({ hasText: 'Action was not verified' }).waitFor()
+  assert.equal(await page.evaluate(() => window.GmailEmailHarness.mailbox().labels.m2.includes('TRASH')), false, 'stale exact snapshot fails closed without trashing the message')
+  assert.equal(await page.evaluate(() => window.GmailEmailHarness.mailbox().calls.filter(call => call.path === '/actions/commit').length), 1, 'failed verified action is not automatically retried')
+
+  await page.evaluate(() => window.GmailEmailHarness.mountMailbox())
+  await page.getByRole('button', { name: 'More' }).last().click()
+  const deleteConfirmSetting = page.getByRole('menuitemcheckbox', { name: /Confirm before deleting/ })
+  assert.equal(await deleteConfirmSetting.getAttribute('aria-checked'), 'true', 'delete confirmation is enabled by default')
+  await deleteConfirmSetting.click()
+  const optOutDelete = page.locator('article').filter({ hasText: 'Synthetic message 2' }).getByRole('button', { name: 'Delete' })
+  await optOutDelete.click()
+  await page.waitForFunction(() => window.GmailEmailHarness.mailbox().labels.m2.includes('TRASH'))
+  assert.equal((await page.getByLabel('Exact action preview').textContent()).trim(), '', 'saved delete-confirmation opt-out skips only the second UI dialog')
+  assert.equal(await page.evaluate(() => window.GmailEmailHarness.mailbox().calls.filter(call => call.path === '/actions/prepare').length), 1, 'opt-out still obtains the authenticated backend ticket')
+  const optedOutCommit = await page.evaluate(() => window.GmailEmailHarness.mailbox().calls.find(call => call.path === '/actions/commit'))
+  assert.deepEqual(optedOutCommit.body, { scope: 'synthetic_scope_12345678901234567890', confirmationToken: 'synthetic-ticket-1', confirmed: true }, 'opt-out still commits the exact prepared card action ticket')
+
+  await page.evaluate(() => window.GmailEmailHarness.mountMailbox())
+  const openedM2Card = page.locator('article').filter({ hasText: 'Synthetic message 2' })
+  await openedM2Card.getByRole('button', { name: /Synthetic message 2/ }).waitFor()
+  await page.evaluate(() => {
+    const cache = window.GmailEmailHarness.queryClient()
+    const active = cache.getQueryCache().getAll().find(query => query.queryKey.includes('search') && query.queryKey.at(-1) === '')
+    if (!active) throw new Error('active synthetic inbox search query is missing')
+    window.GmailEmailHarness.inactiveSearchKey = [...active.queryKey.slice(0, -1), 'synthetic-inactive-page']
+    cache.setQueryData(window.GmailEmailHarness.inactiveSearchKey, {
+      ...active.state.data,
+      messages: active.state.data.messages.map(message => message.id === 'm2'
+        ? { ...message, labelIds: ['INBOX', 'UNREAD', 'IMPORTANT', 'INACTIVE_PAGE_SENTINEL'] } : message)
+    })
+  })
+  await openedM2Card.getByRole('button', { name: /Synthetic message 2/ }).click()
+  await page.waitForFunction(() => window.GmailEmailHarness.mailbox().calls.some(call => call.path.includes('/messages/m2/read?')) &&
+    !window.GmailEmailHarness.mailbox().labels.m2.includes('UNREAD'))
+  await openedM2Card.getByText('Read', { exact: true }).waitFor()
+  assert.equal(await openedM2Card.getByRole('button', { name: 'Mark as read' }).count(), 0,
+    'verified read-on-open updates the visible card from backend-confirmed labels without reload')
+  assert.deepEqual(await page.evaluate(() => {
+    const active = window.GmailEmailHarness.queryClient().getQueryCache().getAll()
+      .find(query => query.queryKey.includes('search') && query.queryKey.at(-1) === '')
+    return active.state.data.messages.find(item => item.id === 'm2').labelIds
+  }), ['INBOX', 'IMPORTANT'], 'active page cache uses exact verified backend labels')
+  assert.deepEqual(await page.evaluate(() => {
+    const active = window.GmailEmailHarness.queryClient().getQueryCache().getAll()
+      .find(query => query.queryKey.includes('search') && query.queryKey.at(-1) === '')
+    return active.state.data.messages.find(item => item.id === 'm1').labelIds
+  }), ['INBOX', 'UNREAD', 'STARRED'], 'read-on-open leaves other active-page cards untouched')
+  assert.deepEqual(await page.evaluate(() => {
+    const message = window.GmailEmailHarness.queryClient().getQueryData(window.GmailEmailHarness.inactiveSearchKey)
+      .messages.find(item => item.id === 'm2')
+    return message.labelIds
+  }), ['INBOX', 'UNREAD', 'IMPORTANT', 'INACTIVE_PAGE_SENTINEL'], 'read-on-open updates only the current page search cache')
+
+  await page.evaluate(() => window.GmailEmailHarness.mountMailbox({ failRead: true }))
+  const failedOpenedM2Card = page.locator('article').filter({ hasText: 'Synthetic message 2' })
+  await failedOpenedM2Card.getByRole('button', { name: /Synthetic message 2/ }).click()
+  await page.getByRole('alert').filter({ hasText: 'Could not verify read status.' }).waitFor()
+  await failedOpenedM2Card.getByText('Unread', { exact: true }).waitFor()
+  assert.equal(await failedOpenedM2Card.getByRole('button', { name: 'Mark as read' }).count(), 1,
+    'failed read-on-open does not change card state or claim read status')
+  assert.equal(await page.evaluate(() => window.GmailEmailHarness.mailbox().labels.m2.includes('UNREAD')), true,
+    'failed read-on-open leaves backend message unread')
+
+  await page.evaluate(() => window.GmailEmailHarness.mountMailbox({ deferredReads: true }))
+  const pendingOpenedM2Card = page.locator('article').filter({ hasText: 'Synthetic message 2' })
+  await pendingOpenedM2Card.getByRole('button', { name: /Synthetic message 2/ }).click()
+  await page.waitForFunction(() => window.GmailEmailHarness.mailbox().pending.has('m2'))
+  for (const name of ['☆ Star', 'Mark as read', 'Delete']) {
+    assert.equal(await pendingOpenedM2Card.getByRole('button', { name }).isDisabled(), true,
+      `m2 ${name} stays disabled until read-on-open verification completes`)
+  }
+  const unrelatedM1Card = page.locator('article').filter({ hasText: 'Synthetic message 1' })
+  for (const name of ['★ Unstar', 'Mark as read', 'Delete']) {
+    assert.equal(await unrelatedM1Card.getByRole('button', { name }).isDisabled(), false,
+      `pending m2 read-on-open does not disable unrelated m1 ${name}`)
+  }
+  assert.equal(await page.evaluate(() => window.GmailEmailHarness.resolveRead('m2')), true)
+  await pendingOpenedM2Card.getByText('Read', { exact: true }).waitFor()
+  assert.equal(await pendingOpenedM2Card.getByRole('button', { name: 'Mark as read' }).count(), 0,
+    'read-on-open success removes the card action after exact backend readback')
+
+  await page.evaluate(() => window.GmailEmailHarness.mountMailbox({ deferredReads: true }))
+  const racedM2Card = page.locator('article').filter({ hasText: 'Synthetic message 2' })
+  const racedM1Card = page.locator('article').filter({ hasText: 'Synthetic message 1' })
+  await racedM2Card.getByRole('button', { name: /Synthetic message 2/ }).click()
+  await page.waitForFunction(() => window.GmailEmailHarness.mailbox().pending.has('m2'))
+  await racedM1Card.getByRole('button', { name: /Synthetic message 1/ }).click()
+  await page.waitForFunction(() => window.GmailEmailHarness.mailbox().pending.has('m1'))
+  assert.equal(await page.evaluate(() => window.GmailEmailHarness.resolveRead('m1')), true)
+  await racedM1Card.getByText('Read', { exact: true }).waitFor()
+  for (const name of ['★ Unstar', 'Delete']) {
+    assert.equal(await racedM1Card.getByRole('button', { name }).isDisabled(), false,
+      `verified m1 read-on-open leaves unrelated card action ${name} operable while m2 is pending`)
+  }
+  assert.equal(await racedM1Card.getByRole('button', { name: /Synthetic message 1/ }).getAttribute('aria-pressed'), 'true',
+    'm1 remains selected while m2 read-on-open is pending')
+  const m1LabelsAfterItsOwnRead = await page.evaluate(() => window.GmailEmailHarness.mailbox().labels.m1)
+  assert.equal(await page.evaluate(() => window.GmailEmailHarness.resolveRead('m2')), true)
+  await racedM2Card.getByText('Read', { exact: true }).waitFor()
+  assert.equal(await racedM2Card.getByRole('button', { name: 'Mark as read' }).count(), 0,
+    'verified m2 readback updates its card after selection moves to m1')
+  assert.deepEqual(await page.evaluate(() => window.GmailEmailHarness.mailbox().labels.m1), m1LabelsAfterItsOwnRead,
+    'late m2 readback does not mutate m1')
+  assert.equal(await racedM1Card.getByRole('button', { name: /Synthetic message 1/ }).getAttribute('aria-pressed'), 'true',
+    'late m2 readback does not change selection from m1')
+
+  await page.evaluate(() => window.GmailEmailHarness.mountMailbox())
+  await page.getByRole('button', { name: /Synthetic message 1/ }).waitFor()
   await page.getByRole('button', { name: /Synthetic message 1/ }).click()
   await page.getByRole('button', { name: /Load images \(1\)/ }).waitFor()
   await page.waitForFunction(() => window.GmailEmailHarness.mailbox().calls.filter(call => call.path.includes('/read')).length === 1)

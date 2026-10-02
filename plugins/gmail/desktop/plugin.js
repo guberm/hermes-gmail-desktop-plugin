@@ -407,6 +407,7 @@ function Mailbox({ ctx, identity, profile, queryPrefix: connectionPrefix, status
   const [ticket, setTicket] = useState(null)
   const [feedback, setFeedback] = useState(null)
   const [readFeedback, setReadFeedback] = useState(null)
+  const [readPendingIds, setReadPendingIds] = useState(() => new Set())
   const [busy, setBusy] = useState(false)
   const guard = useRef(false)
   const live = useRef(null)
@@ -416,6 +417,7 @@ function Mailbox({ ctx, identity, profile, queryPrefix: connectionPrefix, status
   const detailHeading = useRef(null)
   const detailScroll = useRef(null)
   const outcomeTarget = useRef(null)
+  const cardFocusTarget = useRef(null)
   const completedAction = useRef(null)
   const readOnOpenStarted = useRef(new Set())
   const mailbox = useRef(null)
@@ -430,8 +432,9 @@ function Mailbox({ ctx, identity, profile, queryPrefix: connectionPrefix, status
   const scope = identity.scope
   const page = search.pages[search.pages.length - 1]
   const effectiveQuery = inboxQuery(search.q, settings.unreadOnly)
+  const searchKey = [...queryPrefix, scope, 'search', effectiveQuery, page]
   const read = path => ctx.rest(path + (path.includes('?') ? '&' : '?') + new URLSearchParams({ scope }), { timeoutMs: 120000 })
-  const results = useQuery({ ...quietQuery, enabled: !statusUnavailable, refetchInterval: autoRefreshInterval(settings), queryKey: [...queryPrefix, scope, 'search', effectiveQuery, page],
+  const results = useQuery({ ...quietQuery, enabled: !statusUnavailable, refetchInterval: autoRefreshInterval(settings), queryKey: searchKey,
     queryFn: () => read('/search?' + new URLSearchParams({ q: effectiveQuery, maxResults: '20', pageToken: page })) })
   const detail = useQuery({ ...quietQuery, queryKey: [...queryPrefix, scope, 'detail', selected], enabled: !!selected && !statusUnavailable,
     queryFn: () => read('/messages/' + encodeURIComponent(selected)) })
@@ -440,25 +443,39 @@ function Mailbox({ ctx, identity, profile, queryPrefix: connectionPrefix, status
     queryFn: () => read('/threads/' + encodeURIComponent(threadId)) })
   const labels = useQuery({ ...quietQuery, enabled: !statusUnavailable, queryKey: [...queryPrefix, scope, 'labels'], queryFn: () => read('/labels') })
   const mutation = useMutation({ retry: false, gcTime: 0, mutationFn: ({ path, body }) => ctx.rest(path, { method: 'POST', body, timeoutMs: 120000 }) })
-  live.current = { draft, draftThreadId, selected, selectedIds, labelId, ticket, search, detail: detail.data, statusUnavailable, settings }
+  live.current = { draft, draftThreadId, selected, selectedIds, labelId, ticket, search, searchKey, detail: detail.data, statusUnavailable, settings }
 
   async function markOpenedMessageRead(messageId, retry = false) {
     if (!messageId || live.current.statusUnavailable || !mounted.current) return
     if (retry) readOnOpenStarted.current.delete(messageId)
     if (readOnOpenStarted.current.has(messageId)) return
     readOnOpenStarted.current.add(messageId)
+    setReadPendingIds(current => new Set(current).add(messageId))
     try {
       const result = await ctx.rest(`/messages/${encodeURIComponent(messageId)}/read?${new URLSearchParams({ scope })}`, { method: 'POST', timeoutMs: 120000 })
-      if (!mounted.current || live.current.selected !== messageId) return
+      if (!mounted.current) return
       if (result?.status !== 'verified' || result.id !== messageId || !Array.isArray(result.labelIds) || result.labelIds.includes('UNREAD')) throw new Error('Unverified read state')
-      client.setQueryData([...queryPrefix, scope, 'detail', messageId], current => current?.id === messageId ? { ...current, labelIds: result.labelIds } : current)
-      if (live.current.selected === messageId) setReadFeedback(null)
+      client.setQueryData(live.current.searchKey, current => current?.messages ? {
+        ...current,
+        messages: current.messages.map(message => message.id === messageId ? { ...message, labelIds: result.labelIds } : message)
+      } : current)
+      if (live.current.selected === messageId) {
+        client.setQueryData([...queryPrefix, scope, 'detail', messageId], current => current?.id === messageId ? { ...current, labelIds: result.labelIds } : current)
+        setReadFeedback(null)
+      }
     } catch {
       // A failed request must not poison the per-message dedupe set. The
       // selection guard below still prevents stale feedback on another message;
       // reopening this unread message can now issue a fresh attempt.
       readOnOpenStarted.current.delete(messageId)
       if (mounted.current && live.current.selected === messageId) setReadFeedback({ id: messageId, text: 'Could not verify read status. Refresh Gmail to check; unread state remains pending.' })
+    } finally {
+      if (mounted.current) setReadPendingIds(current => {
+        if (!current.has(messageId)) return current
+        const next = new Set(current)
+        next.delete(messageId)
+        return next
+      })
     }
   }
 
@@ -491,7 +508,10 @@ function Mailbox({ ctx, identity, profile, queryPrefix: connectionPrefix, status
     if (live.current.statusUnavailable) recoveryFocus.current = true
     // Successful actions remove/disable their trigger, sometimes only after a slow
     // refresh. Choose a stable target up front rather than lose focus later.
+    const card = trigger.current?.closest?.('article')
     const preferred = completedAction.current === 'send' ? composeButton.current :
+      completedAction.current === 'card-read' ? cardFocusTarget.current || outcomeTarget.current :
+      completedAction.current === 'card-trash' ? outcomeTarget.current :
       completedAction.current ? detailHeading.current : recovering ? composeButton.current : trigger.current
     const target = [preferred, detailHeading.current, composeButton.current, outcomeTarget.current].find(usableFocus)
     target?.focus()
@@ -550,6 +570,44 @@ function Mailbox({ ctx, identity, profile, queryPrefix: connectionPrefix, status
     } catch {
       if (mounted.current) setFeedback({ error: true, text: 'Could not prepare the star change. No change requested. Refresh Gmail and try again.' })
     } finally { mutation.reset(); guard.current = false; if (mounted.current) setBusy(false) }
+  }
+
+  async function prepareCardAction(message, kind) {
+    if (guard.current || live.current.statusUnavailable) return
+    if (!message?.id || !Array.isArray(message.labelIds) ||
+        (kind === 'labels-remove' && !message.labelIds.includes('UNREAD')) ||
+        (kind === 'trash' && message.labelIds.includes('TRASH'))) return
+    guard.current = true; setBusy(true); setFeedback(null)
+    trigger.current = document.activeElement
+    const card = trigger.current?.closest?.('article')
+    cardFocusTarget.current = kind === 'labels-remove'
+      ? [...(card?.querySelectorAll('button') || [])].find(button => button !== trigger.current && !button.disabled) || card
+      : null
+    completedAction.current = null
+    const current = live.current
+    let commitWithoutPrompt = null
+    try {
+      const body = kind === 'trash'
+        ? { scope, action: 'trash', messageId: message.id }
+        : { scope, action: 'labels', messageId: message.id, addLabelIds: [], removeLabelIds: ['UNREAD'] }
+      const prepared = await mutation.mutateAsync({ path: '/actions/prepare', body })
+      const expectedAction = kind === 'trash' ? 'trash' : 'labels'
+      const preview = prepared?.preview
+      if (prepared.scope !== scope || !prepared.confirmationToken || preview?.action !== expectedAction ||
+          preview.message?.id !== message.id ||
+          (kind === 'trash' && preview.effect !== 'Move this message to Trash') ||
+          (kind === 'labels' && (JSON.stringify(preview.addLabelIds) !== '[]' ||
+            JSON.stringify(preview.removeLabelIds) !== '["UNREAD"]')))
+        throw new Error('Invalid card action preview')
+      const approved = { ...prepared, cardAction: kind === 'trash' ? 'trash' : 'read' }
+      if (kind === 'trash' && !shouldConfirmDelete(current.settings)) commitWithoutPrompt = approved
+      else if (mounted.current) setTicket(approved)
+    } catch {
+      if (mounted.current) setFeedback({ error: true, text: 'Could not prepare this message action. No change requested. Refresh Gmail and try again.' })
+    } finally { mutation.reset(); guard.current = false; if (mounted.current) setBusy(false) }
+    // The delete-confirmation preference skips only this second UI review; the
+    // prepared account-bound ticket and explicit card-button intent still commit.
+    if (commitWithoutPrompt && mounted.current) await commit(commitWithoutPrompt)
   }
 
   function beginReply(message, currentThread, replyAll = false) {
@@ -611,7 +669,7 @@ function Mailbox({ ctx, identity, profile, queryPrefix: connectionPrefix, status
       if (mounted.current) {
         setFeedback({ text: 'Gmail action verified by readback. Message ID: ' + result.id })
         if (approved.preview.action === 'send') { setDraft({ to: '', cc: '', subject: '', body: '' }); setCompose(false) }
-        if (approved.preview.action === 'trash') setSelected('')
+        if (approved.preview.action === 'trash' && live.current.selected === approved.preview.message?.id) setSelected('')
         if (approved.preview.action === 'batch') {
           setSelectedIds(new Set())
           if (approved.preview.operation === 'trash') setSelected('')
@@ -624,7 +682,7 @@ function Mailbox({ ctx, identity, profile, queryPrefix: connectionPrefix, status
       guard.current = false
       if (mounted.current) {
         // A settled attempt's focus destination is not a claim of verification.
-        completedAction.current = approved.preview.action
+        completedAction.current = approved.cardAction ? `card-${approved.cardAction}` : approved.preview.action
         setBusy(false); setTicket(null)
       }
     }
@@ -644,8 +702,16 @@ function Mailbox({ ctx, identity, profile, queryPrefix: connectionPrefix, status
     if (selectedMessage?.id === selected && selectedMessage.labelIds?.includes('UNREAD')) void markOpenedMessageRead(selected)
     else if (readFeedback && readFeedback.id !== selected) setReadFeedback(null)
   }, [selected, selectedMessage?.id, selectedMessage?.labelIds?.join(','), statusUnavailable])
+  useLayoutEffect(() => {
+    if (completedAction.current !== 'card-read' || busy) return
+    const card = cardFocusTarget.current
+    if (!usableFocus(card) || [...card.querySelectorAll('button')].some(button => button.textContent.trim() === 'Mark as read')) return
+    card.focus()
+    completedAction.current = null
+  }, [busy, results.data])
   return jsxs('div', { ref: mailbox, style: stack, children: [
     jsx('div', { ref: outcomeTarget, tabIndex: -1, children: feedback && note(feedback.text, feedback.error) }),
+    busy && note('Preparing or verifying Gmail action…'),
     statusUnavailable && busy && note('Action response is still pending. A failed status read does not cancel it. Do not resend; check Gmail if the outcome remains unknown.'),
     jsxs('div', { hidden: statusUnavailable, style: { ...stack, display: statusUnavailable ? 'none' : 'flex', maxWidth: '54rem', width: '100%', margin: '0 auto' }, children: [
     jsxs('header', { style: { ...row, justifyContent: 'space-between', padding: '0.25rem 0' }, children: [
@@ -695,7 +761,7 @@ function Mailbox({ ctx, identity, profile, queryPrefix: connectionPrefix, status
       action('Clear selection', () => setSelectedIds(new Set()), waiting)
     ] }),
     jsxs('div', { style: { ...stack, alignItems: 'stretch' }, children: [
-      jsxs('section', { 'aria-label': 'Search results', hidden: !!selected, style: { ...stack }, children: [
+      jsxs('section', { 'aria-label': 'Search results', style: { ...stack }, children: [
         jsxs('div', { style: { ...row, justifyContent: 'space-between' }, children: [jsx('h2', { style: { margin: 0 }, children: 'Inbox' }), jsx('span', { style: muted, children: results.data?.messages?.length ? `${results.data.messages.length} messages` : '' })] }),
         results.isFetching && note('Loading messages…'),
         results.isError ? note('Could not load messages. Refresh mail or reconnect the backend.', true) :
@@ -704,7 +770,9 @@ function Mailbox({ ctx, identity, profile, queryPrefix: connectionPrefix, status
           const unread = message.labelIds.includes('UNREAD')
           const starred = message.labelIds.includes('STARRED')
           const isSelected = selectedIds.has(message.id)
-          return jsxs('article', { style: { ...mobileCard, ...stack, borderColor: isSelected ? 'var(--ui-accent)' : undefined }, children: [
+          const readPending = readPendingIds.has(message.id)
+          const cardActionsDisabled = waiting || readPending || message.labelIds.includes('TRASH')
+          return jsxs('article', { tabIndex: -1, style: { ...mobileCard, ...stack, borderColor: isSelected ? 'var(--ui-accent)' : undefined }, children: [
             jsxs('div', { style: { ...row, justifyContent: 'space-between' }, children: [
               jsxs('label', { style: { ...row, cursor: 'pointer' }, children: [
                 jsx('input', { type: 'checkbox', checked: isSelected, disabled: waiting || (!isSelected && selectedIds.size >= BATCH_LIMIT),
@@ -712,7 +780,11 @@ function Mailbox({ ctx, identity, profile, queryPrefix: connectionPrefix, status
                   onChange: () => toggleSelected(message.id) }),
                 jsx('span', { children: unread ? 'Unread' : 'Read' })
               ] }),
-              action(starred ? '★ Unstar' : '☆ Star', () => prepareOneLabel(message, starred ? 'labels-remove' : 'labels-add', 'STARRED'), waiting)
+              jsxs('div', { style: row, children: [
+                action(starred ? '★ Unstar' : '☆ Star', () => prepareOneLabel(message, starred ? 'labels-remove' : 'labels-add', 'STARRED'), cardActionsDisabled),
+                unread && action('Mark as read', () => { void prepareCardAction(message, 'labels-remove') }, cardActionsDisabled),
+                action('Delete', () => { void prepareCardAction(message, 'trash') }, cardActionsDisabled)
+              ] })
             ] }),
             jsx(Button, { type: 'button', variant: selected === message.id ? 'secondary' : 'ghost', 'aria-pressed': selected === message.id,
               disabled: waiting, onClick: () => { setSelected(message.id); setLabelId('') },

@@ -24,6 +24,8 @@ Search, reading, and thread inspection are read-only except opening an unread me
 
 ## Mailbox preferences and More
 
+Each inbox message card has a **Mark as read** action when unread and a **Delete** action. Mark as read removes only the `UNREAD` label after exact review and backend readback; Delete moves the selected card message to Gmail Trash (not permanent deletion), with the existing confirmation preference and backend ticket/readback protections preserved.
+
 In Gmail, open the **More** dropdown in the mailbox header (available both in the inbox and message detail). The toggles save persistently for the current Hermes profile and Gmail account:
 
 - **Auto-refresh every 60 seconds** — off by default; enable it to poll the current search at a bounded one-minute interval, or turn it off to stop automatic polling.
