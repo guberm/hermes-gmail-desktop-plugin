@@ -69,6 +69,51 @@ page.on('request', request => { if (request.resourceType() === 'image') allRemot
   await page.waitForFunction(() => !!window.GmailEmailHarness)
   await page.setViewportSize({ width: 360, height: 800 })
 
+  await page.evaluate(() => window.GmailEmailHarness.mountMailbox({ deferredReads: true }))
+  const mobileM2Card = page.locator('article').filter({ hasText: 'Synthetic message 2' })
+    .getByRole('button', { name: /Synthetic message 2/ })
+  await mobileM2Card.click()
+  await page.waitForFunction(() => window.GmailEmailHarness.mailbox().pending.has('m2'))
+  await page.getByRole('heading', { name: 'Synthetic message 2' }).waitFor()
+  await page.getByText('Tile', { exact: true }).waitFor()
+  assert.equal(await mobileM2Card.getAttribute('aria-pressed'), 'true', 'mobile tap selects message m2')
+  const mobileM1Card = page.locator('article').filter({ hasText: 'Synthetic message 1' })
+    .getByRole('button', { name: /Synthetic message 1/ })
+  assert.equal(await mobileM1Card.getAttribute('aria-pressed'), 'false', 'mobile tap leaves m1 unselected')
+  const mobileDetail = page.getByRole('region', { name: 'Message detail' })
+  const mobileDetailGeometry = await mobileDetail.evaluate(element => {
+    const rect = element.getBoundingClientRect()
+    const main = document.querySelector('main')
+    const mainRect = main.getBoundingClientRect()
+    const heading = element.querySelector('h2').getBoundingClientRect()
+    const body = [...element.querySelectorAll('*')].find(node => node.textContent?.trim() === 'Tile')?.getBoundingClientRect()
+    return { top: rect.top, bottom: rect.bottom, height: window.innerHeight,
+      headingTop: heading.top, headingBottom: heading.bottom,
+      bodyTop: body?.top ?? null, bodyBottom: body?.bottom ?? null,
+      mainTop: mainRect.top, mainBottom: mainRect.bottom, mainScrollTop: main.scrollTop,
+      windowScrollY: window.scrollY, documentScrollTop: document.scrollingElement?.scrollTop ?? null }
+  })
+  assert.ok(mobileDetailGeometry.top < mobileDetailGeometry.height && mobileDetailGeometry.bottom > 0,
+    `selected m2 detail must be in the mobile viewport after tap: ${JSON.stringify(mobileDetailGeometry)}`)
+  assert.ok(mobileDetailGeometry.headingTop >= 0 && mobileDetailGeometry.headingBottom <= mobileDetailGeometry.height,
+    `selected subject must be visible after tap: ${JSON.stringify(mobileDetailGeometry)}`)
+  assert.ok(mobileDetailGeometry.bodyTop !== null && mobileDetailGeometry.bodyTop < mobileDetailGeometry.height && mobileDetailGeometry.bodyBottom > 0,
+    `selected message body must be visible after tap: ${JSON.stringify(mobileDetailGeometry)}`)
+  assert.ok(mobileDetailGeometry.headingTop >= mobileDetailGeometry.mainTop && mobileDetailGeometry.bodyTop < mobileDetailGeometry.mainBottom,
+    `selected subject and body must intersect the app pane after tap: ${JSON.stringify(mobileDetailGeometry)}`)
+  console.log(`PASS mobile selected detail visible before readback: ${JSON.stringify(mobileDetailGeometry)}`)
+  assert.equal(await page.evaluate(() => document.activeElement?.getAttribute('aria-pressed')), 'true',
+    'scrolling detail into view does not steal focus from the tapped card')
+  await page.evaluate(() => window.scrollTo({ top: 0, behavior: 'instant' }))
+  const beforeReadbackScroll = await page.evaluate(() => window.scrollY)
+  assert.equal(await page.evaluate(() => window.GmailEmailHarness.resolveRead('m2')), true)
+  await page.locator('article').filter({ hasText: 'Synthetic message 2' })
+    .getByText('Read', { exact: true }).waitFor()
+  assert.equal(await page.evaluate(() => window.scrollY), beforeReadbackScroll,
+    'asynchronous readback does not trigger another scroll after the user scrolls away')
+  assert.deepEqual(await page.evaluate(() => window.GmailEmailHarness.mailbox().labels.m2), ['INBOX', 'IMPORTANT'],
+    'mobile open retains verified read-on-open state')
+
   const formattedMarkup = '<p>first line<br>second<br>third<hr>fourth</p>'
   await page.evaluate(markup => window.GmailEmailHarness.mountEmail(markup), formattedMarkup)
   await page.waitForTimeout(50)

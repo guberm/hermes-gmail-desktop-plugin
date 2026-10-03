@@ -76,6 +76,8 @@ class ShippedSourceContractTests(unittest.TestCase):
 
     def test_mobile_detail_resets_its_scroll_container(self):
         self.assertIn('detailScroll.current?.scrollTo({ top: 0', self.plugin_text)
+        self.assertIn("ref: detailPanel, 'aria-label': 'Message detail'", self.plugin_text)
+        self.assertIn("requestAnimationFrame(() => detailPanel.current?.scrollIntoView({ block: 'start', behavior: 'auto' }))", self.plugin_text)
         self.assertIn("'aria-label': 'Message detail'", self.plugin_text)
 
     def test_selected_subject_is_not_repeated_and_email_colors_follow_theme(self):
@@ -130,7 +132,7 @@ class ShippedSourceContractTests(unittest.TestCase):
         self.assertIn('expected_labels_for_action(ticket.action, ticket.message_snapshot, payload)', self.backend_text)
 
     def test_package_version_bumped(self):
-        self.assertIn('version: 1.0.12', (ROOT / 'plugins/gmail/plugin.yaml').read_text(encoding='utf-8'))
+        self.assertIn('version: 1.0.13', (ROOT / 'plugins/gmail/plugin.yaml').read_text(encoding='utf-8'))
 
 if __name__ == "__main__":
     unittest.main()

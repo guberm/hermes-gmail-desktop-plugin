@@ -415,6 +415,7 @@ function Mailbox({ ctx, identity, profile, queryPrefix: connectionPrefix, status
   const trigger = useRef(null)
   const composeButton = useRef(null)
   const detailHeading = useRef(null)
+  const detailPanel = useRef(null)
   const detailScroll = useRef(null)
   const outcomeTarget = useRef(null)
   const cardFocusTarget = useRef(null)
@@ -787,7 +788,11 @@ function Mailbox({ ctx, identity, profile, queryPrefix: connectionPrefix, status
               ] })
             ] }),
             jsx(Button, { type: 'button', variant: selected === message.id ? 'secondary' : 'ghost', 'aria-pressed': selected === message.id,
-              disabled: waiting, onClick: () => { setSelected(message.id); setLabelId('') },
+              disabled: waiting, onClick: () => {
+                setSelected(message.id)
+                setLabelId('')
+                requestAnimationFrame(() => detailPanel.current?.scrollIntoView({ block: 'start', behavior: 'auto' }))
+              },
               style: { ...stack, alignItems: 'flex-start', textAlign: 'left', whiteSpace: 'normal', width: '100%', boxSizing: 'border-box', fontWeight: unread ? 700 : 400 },
               children: [jsx('strong', { style: text, children: message.subject || '(No subject)' }, 'subject'),
                 jsx('span', { style: { ...muted, ...text }, children: message.from }, 'from'),
@@ -799,7 +804,7 @@ function Mailbox({ ctx, identity, profile, queryPrefix: connectionPrefix, status
           action('Next page', () => { setSearch(c => ({ ...c, pages: [...c.pages, results.data.nextPageToken] })); setSelected(''); setSelectedIds(new Set()) }, waiting || results.isFetching || results.isError || !results.data?.nextPageToken)
         ] })
       ] }),
-      jsxs('section', { 'aria-label': 'Message detail', hidden: !selected, style: { ...stack, ...mobileCard, padding: 0, overflow: 'hidden', minHeight: '60vh' }, children: [
+      jsxs('section', { ref: detailPanel, 'aria-label': 'Message detail', hidden: !selected, style: { ...stack, ...mobileCard, padding: 0, overflow: 'hidden', minHeight: '60vh' }, children: [
         jsxs('div', { style: { ...row, justifyContent: 'space-between', padding: '0.75rem', borderBottom: '1px solid var(--ui-stroke-secondary)', position: 'sticky', top: 0, background: 'var(--ui-bg-secondary)', zIndex: 1 }, children: [
           action('← Inbox', () => setSelected(''), waiting, { ref: detailHeading }),
           jsxs('div', { style: row, children: [
