@@ -41,7 +41,7 @@ def b64(text: str) -> str:
     return base64.urlsafe_b64encode(text.encode()).decode().rstrip("=")
 
 
-def message(mid="m1", labels=None, body="plain body", html=None, attachment=False):
+def message(mid="m1", labels=None, body="plain body", html=None, attachment=False, attachments=None):
     headers = [
         {"name": "From", "value": "Sender <sender@example.com>"},
         {"name": "To", "value": "user@example.com"},
@@ -55,6 +55,12 @@ def message(mid="m1", labels=None, body="plain body", html=None, attachment=Fals
         parts.append({"mimeType": "text/html", "body": {"data": b64(html)}})
     if attachment:
         parts.insert(0, {"mimeType": "text/plain", "filename": "secret.txt", "body": {"data": b64("attachment secret")}})
+    for item in attachments or []:
+        parts.append({
+            "mimeType": item.get("mimeType", "application/octet-stream"),
+            "filename": item["filename"],
+            "body": {"attachmentId": item.get("attachmentId", "att-" + mid), "size": item.get("size", 12)},
+        })
     return {
         "id": mid,
         "threadId": "t" + mid,
@@ -92,6 +98,9 @@ class FakeMessages:
     def get(self, **kwargs):
         self.f.calls.append(("get", kwargs))
         return FakeRequest(self.f, "get", lambda: self.f.messages[kwargs["id"]])
+
+    def attachments(self):
+        return FakeAttachments(self.f)
 
     def send(self, **kwargs):
         self.f.calls.append(("send", kwargs))
@@ -135,6 +144,16 @@ class FakeLabels:
         return FakeRequest(self.f, "labels", lambda: {"labels": self.f.labels})
 
 
+class FakeAttachments:
+    def __init__(self, fake): self.f = fake
+    def get(self, **kwargs):
+        self.f.calls.append(("attachments.get", kwargs))
+        content = self.f.attachments.get(kwargs["id"])
+        return FakeRequest(self.f, "attachments.get", lambda: {
+            "attachmentId": kwargs["id"], "size": len(content), "data": b64(content),
+        })
+
+
 class FakeUsers:
     def __init__(self, fake): self.f = fake
     def getProfile(self, **kwargs):
@@ -142,6 +161,7 @@ class FakeUsers:
         return FakeRequest(self.f, "profile", lambda: {"emailAddress": self.f.account})
     def messages(self): return FakeMessages(self.f)
     def labels(self): return FakeLabels(self.f)
+    def attachments(self): return FakeAttachments(self.f)
 
 
 class FakeService:
@@ -153,6 +173,7 @@ class FakeService:
             {"id": "L1", "name": "Projects", "type": "user"},
             {"id": "L2", "name": "Later", "type": "user"},
         ]
+        self.attachments = {"att-m1": "attachment secret"}
         self.calls = []
         self.executions = []
         self.failures = {}
@@ -211,7 +232,7 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         data = response.json()
         self.assertEqual(data["nextPageToken"], "next-token")
-        self.assertEqual(set(data["messages"][0]), {"id", "threadId", "from", "to", "cc", "subject", "date", "snippet", "labelIds"})
+        self.assertEqual(set(data["messages"][0]), {"id", "threadId", "from", "to", "cc", "subject", "date", "snippet", "labelIds", "attachments"})
         list_call = next(call for call in self.services[str(self.a)].calls if call[0] == "list")
         self.assertEqual(list_call[1]["pageToken"], "p0")
         self.assertTrue(all(retries == 0 for _, retries in self.services[str(self.a)].executions))
@@ -231,6 +252,68 @@ class BackendTests(unittest.TestCase):
         capped = self.client.get("/api/plugins/gmail/messages/m1", params={"scope": status["scope"]}).json()
         self.assertEqual(len(capped["body"].encode()), api._MAX_BODY_BYTES)
         self.assertTrue(capped["bodyTruncated"])
+
+    def test_attachment_metadata_is_listed_and_bounded(self):
+        status = self.status()
+        fake = self.services[str(self.a)]
+        fake.messages["m1"] = message(attachments=[
+            {"filename": "report.pdf", "mimeType": "application/pdf", "size": 12345, "attachmentId": "attA"},
+            {"filename": "data.csv", "mimeType": "text/csv", "size": 99, "attachmentId": "attB"},
+        ])
+        response = self.client.get("/api/plugins/gmail/messages/m1", params={"scope": status["scope"]})
+        self.assertEqual(response.status_code, 200, response.text)
+        listed = response.json()["attachments"]
+        self.assertEqual(listed, [
+            {"filename": "report.pdf", "mimeType": "application/pdf", "size": 12345, "attachmentId": "attA"},
+            {"filename": "data.csv", "mimeType": "text/csv", "size": 99, "attachmentId": "attB"},
+        ])
+        # The attachment list rides on every public message, including search rows.
+        search = self.client.get("/api/plugins/gmail/search", params={"scope": status["scope"]}).json()
+        self.assertIn("attachments", search["messages"][0])
+        # Bounded: only the first _MAX_ATTACHMENTS parts are listed.
+        fake.messages["m1"] = message(attachments=[
+            {"filename": f"file{i}.bin", "attachmentId": f"att{i:02d}"} for i in range(api._MAX_ATTACHMENTS + 10)
+        ])
+        capped_list = self.client.get("/api/plugins/gmail/messages/m1", params={"scope": status["scope"]}).json()["attachments"]
+        self.assertEqual(len(capped_list), api._MAX_ATTACHMENTS)
+
+    def test_attachment_content_endpoint_is_scoped_and_bounded(self):
+        scope = self.status()["scope"]
+        response = self.client.get("/api/plugins/gmail/messages/m1/attachments/att-m1", params={"scope": scope})
+        self.assertEqual(response.status_code, 200, response.text)
+        import base64 as b64mod
+        data = response.json()
+        self.assertEqual(data["size"], len("attachment secret"))
+        self.assertEqual(b64mod.urlsafe_b64decode(data["data"]).decode(), "attachment secret")
+        # Scope mismatch is refused before any provider call: profile B's home
+        # cannot consume profile A's scope.
+        token_b = set_hermes_home_override(self.b)
+        try:
+            self.status()  # register B's scope
+            self.assertEqual(self.client.get("/api/plugins/gmail/messages/m1/attachments/att-m1", params={"scope": scope}).status_code, 409)
+            self.assertFalse(any(kind == "attachments.get" for kind, _ in self.services[str(self.b)].calls))
+        finally:
+            reset_hermes_home_override(token_b)
+        # Unknown attachment id is a sanitized provider error, not a crash.
+        missing = self.client.get("/api/plugins/gmail/messages/m1/attachments/nope", params={"scope": scope})
+        self.assertEqual(missing.status_code, 502)
+        self.assertNotIn("SECRET", missing.text)
+
+    def test_html_fallback_text_keeps_unreachable_links(self):
+        status = self.status()
+        fake = self.services[str(self.a)]
+        fake.messages["m1"] = message(body=None, html='<p>See <a href="https://example.test/doc?x=1">the doc</a> and <a href="https://example.test/list">the list</a>.</p>')
+        response = self.client.get("/api/plugins/gmail/messages/m1", params={"scope": status["scope"]})
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()["body"]
+        self.assertIn("the doc", body)
+        self.assertIn("Links:", body)
+        self.assertIn("https://example.test/doc?x=1", body)
+        self.assertIn("https://example.test/list", body)
+        # A link whose URL text is already in the body gets no appendix entry.
+        fake.messages["m1"] = message(body=None, html='<p>Open https://example.test/direct now</p><a href="https://example.test/direct">https://example.test/direct</a>')
+        body2 = self.client.get("/api/plugins/gmail/messages/m1", params={"scope": status["scope"]}).json()["body"]
+        self.assertNotIn("Links:", body2)
 
     def test_html_sanitizer_keeps_formatting_and_drops_active_markup_and_urls(self):
         safe = api.sanitize_email_html(

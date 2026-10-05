@@ -24,6 +24,9 @@ const interval = loadFunction('autoRefreshInterval', 'shouldConfirmDelete')
 const confirmDelete = loadFunction('shouldConfirmDelete', null)
 const toggleSelection = loadFunction('toggleMessageSelection', 'gmailSettings', 'const BATCH_LIMIT = 20')
 const starChange = loadFunction('starLabelChange', 'contextText')
+const chips = loadFunction('userLabelChips', 'formatAttachmentSize', 'const SYSTEM_CHIP_LABELS = new Set([\'INBOX\', \'UNREAD\', \'SENT\', \'DRAFT\', \'TRASH\', \'IMPORTANT\', \'SPAM\', \'STARRED\', \'CATEGORY_PERSONAL\', \'CATEGORY_SOCIAL\', \'CATEGORY_UPDATES\', \'CATEGORY_FORUMS\', \'CATEGORY_PROMOTIONS\'])')
+const sizeFmt = loadFunction('formatAttachmentSize', 'newMessageIds')
+const newIds = loadFunction('newMessageIds', 'menuSetting')
 
 test('preference defaults and persisted booleans are explicit', () => {
   assert.deepEqual(settings(null), { autoRefresh: false, unreadOnly: false, deleteConfirmation: true, alwaysShowImages: false })
@@ -105,4 +108,31 @@ test('star card action prepares reversible system-label changes', () => {
   assert.deepEqual(starChange({ labelIds: ['INBOX'] }), { addLabelIds: ['STARRED'], removeLabelIds: [] })
   assert.deepEqual(starChange({ labelIds: ['INBOX', 'STARRED'] }), { addLabelIds: [], removeLabelIds: ['STARRED'] })
   assert.match(source, /prepareOneLabel\(message\)/)
+})
+
+test('label chips filter system/category labels, resolve names, and stay bounded', () => {
+  const byId = { L1: 'Projects', L2: 'Later' }
+  assert.deepEqual(chips({ labelIds: ['INBOX', 'UNREAD', 'L1', 'CATEGORY_SOCIAL', 'L2'] }, byId), ['Projects', 'Later'])
+  assert.deepEqual(chips({ labelIds: ['INBOX', 'CATEGORY_UPDATES'] }, byId), [])
+  assert.deepEqual(chips({ labelIds: ['L1'] }, null), ['L1'])
+  assert.deepEqual(chips(null, byId), [])
+  const many = chips({ labelIds: ['L1', 'L2', 'X1', 'X2', 'X3', 'X4', 'X5', 'X6', 'X7'] }, byId)
+  assert.equal(many.length, 8)
+})
+
+test('attachment sizes format human-readable and reject invalid input', () => {
+  assert.equal(sizeFmt(512), '512 B')
+  assert.equal(sizeFmt(2048), '2 KB')
+  assert.equal(sizeFmt(5 * 1024 * 1024), '5.0 MB')
+  assert.equal(sizeFmt(-1), '')
+  assert.equal(sizeFmt('x'), '')
+})
+
+test('new-mail diff finds unseen ids, bounded, robust to non-sets', () => {
+  assert.deepEqual(newIds(new Set(['a', 'b']), ['b', 'c', 'd']), ['c', 'd'])
+  assert.deepEqual(newIds(new Set(), []), [])
+  assert.deepEqual(newIds(null, ['a']), ['a'])
+  assert.deepEqual(newIds(new Set(['a']), 'not-a-list'), [])
+  const many = newIds(new Set(), Array.from({ length: 50 }, (_, i) => `m${i}`))
+  assert.equal(many.length, 20)
 })

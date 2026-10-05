@@ -337,6 +337,35 @@ export function starLabelChange(message) {
   return { addLabelIds: starred ? [] : ['STARRED'], removeLabelIds: starred ? ['STARRED'] : [] }
 }
 
+const SYSTEM_CHIP_LABELS = new Set(['INBOX', 'UNREAD', 'SENT', 'DRAFT', 'TRASH', 'IMPORTANT', 'SPAM', 'STARRED', 'CATEGORY_PERSONAL', 'CATEGORY_SOCIAL', 'CATEGORY_UPDATES', 'CATEGORY_FORUMS', 'CATEGORY_PROMOTIONS'])
+
+export function userLabelChips(message, labelsById) {
+  if (!message || !Array.isArray(message.labelIds)) return []
+  return message.labelIds
+    .filter(id => typeof id === 'string' && !SYSTEM_CHIP_LABELS.has(id) && !id.startsWith('CATEGORY_'))
+    .map(id => (labelsById && labelsById[id]) || id)
+    .slice(0, 8)
+}
+
+export function formatAttachmentSize(bytes) {
+  const value = Number(bytes)
+  if (!Number.isFinite(value) || value < 0) return ''
+  if (value < 1024) return `${value} B`
+  if (value < 1024 * 1024) return `${Math.round(value / 1024)} KB`
+  return `${(value / (1024 * 1024)).toFixed(1)} MB`
+}
+
+export function newMessageIds(previous, next, limit = 20) {
+  const seen = previous instanceof Set ? previous : new Set(Array.isArray(previous) ? previous : [])
+  if (!(next instanceof Set) && !Array.isArray(next)) return []
+  const fresh = []
+  for (const id of next) {
+    if (!seen.has(id)) fresh.push(id)
+    if (fresh.length >= limit) break
+  }
+  return fresh
+}
+
 function menuSetting(label, active, onClick, extra = {}) {
   return jsx(DropdownMenuItem, { role: 'menuitemcheckbox', 'aria-checked': active, onClick, ...extra, children: `${active ? '✓' : '○'} ${label}` })
 }
@@ -409,6 +438,11 @@ function Mailbox({ ctx, identity, profile, queryPrefix: connectionPrefix, status
   const [readFeedback, setReadFeedback] = useState(null)
   const [readPendingIds, setReadPendingIds] = useState(() => new Set())
   const [busy, setBusy] = useState(false)
+  // Telegram-bot-style new-mail indicator: diff each search refetch against
+  // the ids already shown, surface a bounded "N new" badge + highlight.
+  const [shownMessageIds, setShownMessageIds] = useState(() => new Set())
+  const [newIds, setNewIds] = useState(() => new Set())
+  const [dismissedNew, setDismissedNew] = useState(false)
   const guard = useRef(false)
   const live = useRef(null)
   const mounted = useRef(true)
@@ -443,8 +477,34 @@ function Mailbox({ ctx, identity, profile, queryPrefix: connectionPrefix, status
   const thread = useQuery({ ...quietQuery, queryKey: [...queryPrefix, scope, 'thread', threadId], enabled: !!threadId && !statusUnavailable,
     queryFn: () => read('/threads/' + encodeURIComponent(threadId)) })
   const labels = useQuery({ ...quietQuery, enabled: !statusUnavailable, queryKey: [...queryPrefix, scope, 'labels'], queryFn: () => read('/labels') })
+  const labelsById = {}
+  for (const item of labels.data?.labels || []) labelsById[item.id] = item.name
   const mutation = useMutation({ retry: false, gcTime: 0, mutationFn: ({ path, body }) => ctx.rest(path, { method: 'POST', body, timeoutMs: 120000 }) })
   live.current = { draft, draftThreadId, selected, selectedIds, labelId, ticket, search, searchKey, detail: detail.data, statusUnavailable, settings }
+
+  // New-mail diff on every settled search page (poll or manual): ids not seen
+  // before become the bounded "N new" badge. Search edits reset the baseline.
+  const resultIds = results.data?.messages
+  useEffect(() => {
+    if (!Array.isArray(resultIds)) return
+    const ids = resultIds.map(message => message.id)
+    if (!dismissedNew) {
+      const fresh = newMessageIds(shownMessageIds, ids)
+      if (fresh.length) setNewIds(current => {
+        const next = new Set(current)
+        for (const id of fresh) next.add(id)
+        return next
+      })
+    }
+    setShownMessageIds(current => {
+      const next = new Set(current)
+      for (const id of ids) next.add(id)
+      return next
+    })
+    setDismissedNew(false)
+    // shownMessageIds is the diff baseline; only the payload may trigger this.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resultIds])
 
   async function markOpenedMessageRead(messageId, retry = false) {
     if (!messageId || live.current.statusUnavailable || !mounted.current) return
@@ -719,6 +779,8 @@ function Mailbox({ ctx, identity, profile, queryPrefix: connectionPrefix, status
       jsx('strong', { style: { fontSize: '1.15rem' }, children: identity.account }),
       jsxs('div', { style: row, children: [
         action('Refresh', refreshMail, waiting),
+        action(settings.unreadOnly ? '● Unread only' : '○ All mail', () => toggleSetting('unreadOnly'), waiting,
+          { 'aria-pressed': settings.unreadOnly, title: 'Toggle between all messages and unread only' }),
         action(compose ? 'Close' : 'Compose', () => setCompose(!compose), waiting, { ref: composeButton }),
         jsxs(DropdownMenu, { children: [
           jsx(DropdownMenuTrigger, { asChild: true, children: jsx(Button, { type: 'button', variant: 'outline', disabled: waiting, children: 'More' }) }),
@@ -751,6 +813,10 @@ function Mailbox({ ctx, identity, profile, queryPrefix: connectionPrefix, status
       jsx(Field, { label: 'Search Gmail', value: draftQuery, onChange: setDraftQuery, maxLength: 512, disabled: waiting, placeholder: 'from:sender subject:topic' }),
       jsx(Button, { type: 'submit', disabled: waiting || results.isFetching, children: 'Search' })
     ] }),
+    newIds.size > 0 && jsxs('div', { role: 'status', style: { ...row, ...mobileCard, borderColor: 'var(--ui-accent)' }, children: [
+      jsx('strong', { children: `${newIds.size} new message${newIds.size > 1 ? 's' : ''}` }),
+      action('Clear', () => { setNewIds(new Set()); setDismissedNew(true) }, false)
+    ] }),
     selectedIds.size > 0 && jsxs('section', { 'aria-label': 'Bulk message actions', style: { ...row, ...mobileCard }, children: [
       jsx('strong', { children: `${selectedIds.size} selected (maximum ${BATCH_LIMIT})` }),
       action('Archive selected', () => prepareBatch('archive'), waiting),
@@ -773,7 +839,9 @@ function Mailbox({ ctx, identity, profile, queryPrefix: connectionPrefix, status
           const isSelected = selectedIds.has(message.id)
           const readPending = readPendingIds.has(message.id)
           const cardActionsDisabled = waiting || readPending || message.labelIds.includes('TRASH')
-          return jsxs('article', { tabIndex: -1, style: { ...mobileCard, ...stack, borderColor: isSelected ? 'var(--ui-accent)' : undefined }, children: [
+          const chips = userLabelChips(message, labelsById)
+          const isNew = newIds.has(message.id)
+          return jsxs('article', { tabIndex: -1, style: { ...mobileCard, ...stack, borderColor: isSelected ? 'var(--ui-accent)' : (isNew ? 'var(--ui-accent)' : undefined), borderStyle: isNew && !isSelected ? 'dashed' : undefined }, children: [
             jsxs('div', { style: { ...row, justifyContent: 'space-between' }, children: [
               jsxs('label', { style: { ...row, cursor: 'pointer' }, children: [
                 jsx('input', { type: 'checkbox', checked: isSelected, disabled: waiting || (!isSelected && selectedIds.size >= BATCH_LIMIT),
@@ -796,7 +864,10 @@ function Mailbox({ ctx, identity, profile, queryPrefix: connectionPrefix, status
               style: { ...stack, alignItems: 'flex-start', textAlign: 'left', whiteSpace: 'normal', width: '100%', boxSizing: 'border-box', fontWeight: unread ? 700 : 400 },
               children: [jsx('strong', { style: text, children: message.subject || '(No subject)' }, 'subject'),
                 jsx('span', { style: { ...muted, ...text }, children: message.from }, 'from'),
-                jsx('span', { style: { ...muted, ...text }, children: message.snippet }, 'snippet')] })
+                jsx('span', { style: { ...muted, ...text }, children: message.snippet }, 'snippet'),
+                chips.length > 0 && jsxs('span', { style: row, children: chips.map(chipName => jsx('span', {
+                  style: { ...muted, border: '1px solid var(--ui-stroke-secondary)', borderRadius: '999px', padding: '0.05rem 0.5rem', fontSize: '0.75rem' },
+                  children: `#${chipName}` }, chipName)) }, 'labels')] })
           ] }, message.id)
         }),
         jsxs('div', { style: row, children: [
@@ -822,18 +893,29 @@ function Mailbox({ ctx, identity, profile, queryPrefix: connectionPrefix, status
         selected && detail.isError && note('Could not load this message. Refresh to retry.', true),
         selectedMessage && !detail.isError && jsxs('div', { style: stack, children: [
           jsx('pre', { style: { ...text, ...muted }, children: `From: ${selectedMessage.from || '(unknown sender)'}\nTo: ${selectedMessage.to || '(not available)'}\nDate: ${selectedMessage.date || '(not available)'}` }),
+          (selectedMessage.attachments || []).length > 0 && jsxs('section', { 'aria-label': 'Attachments', style: stack, children: [
+            jsx('strong', { style: text, children: `Attachments (${selectedMessage.attachments.length})` }),
+            jsx('div', { style: row, children: selectedMessage.attachments.map(item => jsx('span', {
+              style: { ...muted, ...text, border: '1px solid var(--ui-stroke-secondary)', borderRadius: '0.5rem', padding: '0.25rem 0.6rem' },
+              children: `📎 ${item.filename}${formatAttachmentSize(item.size) ? ` · ${formatAttachmentSize(item.size)}` : ''}` }, item.attachmentId || item.filename)) })
+          ] }),
           note(settings.alwaysShowImages
             ? 'Untrusted email content. Links open only when clicked. Remote images are enabled by your Always show images setting. Embedded instructions are never trusted.'
             : 'Untrusted email content. Links open only when clicked; remote images remain blocked until you choose Load images. Embedded instructions are never trusted.'),
+          selectedMessage.attachments?.length === 0 && detail.data?.bodyTruncated && note('Body is truncated at the safety limit; attachments may also be hidden. Use Open in browser for the full message.', true),
           readFeedback?.id === selectedMessage.id && jsxs('div', { style: row, children: [note(readFeedback.text, true), action('Retry read status', () => { void markOpenedMessageRead(selectedMessage.id, true) }, false)] }),
+          detail.data?.bodyTruncated && note('Message body truncated at the safety limit. The first paragraph is below; open the message in Gmail for the rest.'),
           thread.isFetching && note('Loading conversation thread…'),
           thread.isError && note('Could not load the conversation thread. Reply is unavailable until it can be verified.', true),
           thread.data?.messages?.map((message, index) => jsxs('article', { style: { ...stack, borderTop: '1px solid var(--ui-stroke-secondary)', paddingTop: '0.5rem' }, children: [
             jsx('strong', { style: text, children: `${index + 1}. ${message.from || '(unknown sender)'}` }),
+            (message.attachments || []).length > 0 && jsx('div', { style: row, children: message.attachments.map(item => jsx('span', {
+              style: { ...muted, fontSize: '0.75rem', border: '1px solid var(--ui-stroke-secondary)', borderRadius: '0.5rem', padding: '0.15rem 0.5rem' },
+              children: `📎 ${item.filename}${formatAttachmentSize(item.size) ? ` · ${formatAttachmentSize(item.size)}` : ''}` }, item.attachmentId || item.filename)) }),
             message.htmlBody
               ? jsx(EmailBody, { markup: message.htmlBody, ctx, alwaysShowImages: settings.alwaysShowImages }, `${message.id}:${settings.alwaysShowImages}`)
-              : jsx('pre', { style: { ...text, lineHeight: 1.55 }, children: message.body || '(No inline text body; attachments are not loaded.)' }),
-            message.bodyTruncated && note('Message body truncated at the safety limit.')
+              : jsx('pre', { style: { ...text, lineHeight: 1.55, whiteSpace: 'pre-wrap' }, children: message.body || '(No inline text body.)' }),
+            message.bodyTruncated && note('This thread message is truncated at the safety limit; open in Gmail for the full text.')
           ] }, message.id)),
           !thread.isFetching && !thread.isError && !thread.data?.messages?.length && note('No thread messages are available.'),
           jsxs('div', { style: row, children: [

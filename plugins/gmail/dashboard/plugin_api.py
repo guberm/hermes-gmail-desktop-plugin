@@ -59,6 +59,8 @@ _MAX_SCOPES = 128
 _MAX_BODY_BYTES = 256 * 1024
 _MAX_PROVIDER_TEXT = 16 * 1024
 _MAX_THREAD_MESSAGES = 100
+_MAX_ATTACHMENTS = 20
+_MAX_TEXT_LINKS = 100
 _READ_ON_OPEN_LOCK = threading.Lock()
 _ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,256}$")
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{20,256}$")
@@ -284,13 +286,20 @@ class _TextExtractor(HTMLParser):
         super().__init__(convert_charrefs=True)
         self.parts: list[str] = []
         self.suppressed = 0
+        self.links: list[str] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        del attrs
-        if tag.lower() in {"script", "style", "template", "noscript"}:
+        lowered = tag.lower()
+        if lowered in {"script", "style", "template", "noscript"}:
             self.suppressed += 1
-        elif not self.suppressed and tag.lower() in {"br", "p", "div", "li", "tr", "h1", "h2", "h3"}:
+        elif not self.suppressed and lowered in {"br", "p", "div", "li", "tr", "h1", "h2", "h3"}:
             self.parts.append("\n")
+        # A plain-text fallback must not lose the destinations the author
+        # linked: emit "text: url" like the Telegram bots do, deduplicated.
+        elif not self.suppressed and lowered == "a" and isinstance(self.links, list):
+            href = next((value for key, value in attrs if key == "href"), None)
+            if isinstance(href, str) and href and len(self.links) < _MAX_TEXT_LINKS:
+                self.links.append(href[:2048])
 
     def handle_endtag(self, tag: str) -> None:
         if tag.lower() in {"script", "style", "template", "noscript"} and self.suppressed:
@@ -902,7 +911,42 @@ def _public_message(raw: dict[str, Any]) -> dict[str, Any]:
         "date": headers.get("date", ""),
         "snippet": _clean_provider_text(raw.get("snippet")),
         "labelIds": label_ids,
+        "attachments": _attachment_summary(raw.get("payload", {})),
     }
+
+
+def _walk_attachment_parts(part: Any, found: list[dict[str, Any]]) -> None:
+    if not isinstance(part, dict) or len(found) >= _MAX_ATTACHMENTS:
+        return
+    filename = _clean_provider_text(part.get("filename"), 256)
+    if filename:
+        # A provider-named part is an attachment. Never recurse through it and
+        # never interpret its bytes as the message body.
+        body = part.get("body")
+        size = body.get("size") if isinstance(body, dict) else None
+        try:
+            size = int(size)
+        except (TypeError, ValueError, OverflowError):
+            size = 0
+        found.append({
+            "filename": filename,
+            "mimeType": _clean_provider_text(part.get("mimeType"), 128),
+            "size": max(0, size),
+            "attachmentId": _clean_provider_text(body.get("attachmentId") if isinstance(body, dict) else None, 256),
+        })
+        return
+    parts = part.get("parts", [])
+    if isinstance(parts, list):
+        for child in parts[:200]:
+            _walk_attachment_parts(child, found)
+            if len(found) >= _MAX_ATTACHMENTS:
+                return
+
+
+def _attachment_summary(payload: Any) -> list[dict[str, Any]]:
+    found: list[dict[str, Any]] = []
+    _walk_attachment_parts(payload, found)
+    return found
 
 
 def _decode_body_data(value: Any) -> tuple[str, bool]:
@@ -958,6 +1002,23 @@ def _extract_body(payload: Any) -> tuple[str, bool]:
                 truncated = rich[0][1]
             except Exception:
                 text, truncated = "", False
+            # Keep the link destinations the sanitizer's plain fallback would
+            # otherwise drop entirely. Links whose URL text is already in the
+            # body are skipped; bounded count and length.
+            if text:
+                missing = []
+                seen: set[str] = set()
+                for link in parser.links:
+                    if link in seen or link in text:
+                        continue
+                    seen.add(link)
+                    missing.append(link)
+                if missing:
+                    appendix = "Links:\n" + "\n".join(missing[:_MAX_TEXT_LINKS])
+                    appendix = appendix[:2048]
+                    encoded = text.encode("utf-8") + appendix.encode("utf-8")
+                    if len(encoded) <= _MAX_BODY_BYTES:
+                        text = text + "\n\n" + appendix
         else:
             text, truncated = "", False
     encoded = text.encode("utf-8")
@@ -1198,6 +1259,53 @@ def labels(request: Request, scope: ScopeText) -> dict[str, Any]:
     service, _, _ = _provider_context(binding)
     try:
         return {"labels": _list_user_labels(service)}
+    except Exception:
+        raise _provider_error() from None
+
+
+_MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
+
+
+@router.get("/messages/{message_id}/attachments/{attachment_id}")
+def attachment_content(request: Request, message_id: MessageId, attachment_id: MessageId,
+                      scope: ScopeText) -> dict[str, Any]:
+    """Read-only single-attachment fetch, bounded, profile/account-scoped."""
+    _reject_query_extras(request, {"scope"})
+    binding = _binding(scope)
+    service, _, _ = _provider_context(binding)
+    try:
+        # attachmentId is Gmail's opaque [A-Za-z0-9_-]+ token, same shape as
+        # MessageId; identity checks mirror _get_message.
+        result = _execute(service.users().messages().attachments().get(
+            userId="me", messageId=message_id, id=attachment_id,
+        ))
+        data = result.get("data")
+        if not isinstance(data, str) or not data:
+            raise ValueError("invalid attachment payload")
+        size = result.get("size")
+        try:
+            size = int(size)
+        except (TypeError, ValueError, OverflowError):
+            size = 0
+        if not 0 <= size <= _MAX_ATTACHMENT_BYTES or len(data) > ((_MAX_ATTACHMENT_BYTES + 2) // 3) * 4:
+            raise ValueError("attachment exceeds the size limit")
+        # Gmail returns unpadded urlsafe base64; pad to a multiple of 4 like
+        # _decode_body_data does before decoding.
+        encoded = data + "=" * (-len(data) % 4)
+        try:
+            decoded = base64.urlsafe_b64decode(encoded.encode("ascii"))
+        except (UnicodeEncodeError, binascii.Error, ValueError):
+            raise ValueError("invalid attachment payload") from None
+        if len(decoded) > _MAX_ATTACHMENT_BYTES:
+            raise ValueError("attachment exceeds the size limit")
+        return {
+            "id": _clean_provider_text(result.get("attachmentId", attachment_id), 256),
+            "messageId": message_id,
+            "size": len(decoded),
+            "data": base64.urlsafe_b64encode(decoded).decode("ascii"),
+        }
+    except HTTPException:
+        raise
     except Exception:
         raise _provider_error() from None
 
