@@ -511,22 +511,29 @@ function Mailbox({ ctx, identity, profile, queryPrefix: connectionPrefix, status
   live.current = { draft, draftThreadId, selected, selectedIds, labelId, ticket, search, searchKey, detail: detail.data, statusUnavailable, settings }
 
   // New-mail diff on every settled search page (poll or manual): ids not seen
-  // before become the bounded "N new" badge. Search edits reset the baseline.
+  // before become the bounded "N new" badge. Only UNREAD arrivals count as
+  // new; acted-on or vanished messages leave the badge on the next settle.
   const resultIds = results.data?.messages
   useEffect(() => {
     if (!Array.isArray(resultIds)) return
     const ids = resultIds.map(message => message.id)
-    if (!dismissedNew) {
-      const fresh = newMessageIds(shownMessageIds, ids)
-      if (fresh.length) setNewIds(current => {
-        const next = new Set(current)
-        for (const id of fresh) next.add(id)
-        return next
-      })
-    }
+    const present = new Set(ids)
     setShownMessageIds(current => {
       const next = new Set(current)
       for (const id of ids) next.add(id)
+      return next
+    })
+    setNewIds(current => {
+      const next = new Set()
+      if (!dismissedNew) {
+        for (const message of resultIds) {
+          if (!current.has(message.id) && !shownMessageIds.has(message.id) && message.labelIds?.includes('UNREAD')) next.add(message.id)
+          else if (current.has(message.id) && present.has(message.id)) next.add(message.id)
+          if (next.size >= 20) break
+        }
+      }
+      // Dropped: ids no longer in results (deleted/archived/acted) and
+      // everything when the badge was dismissed.
       return next
     })
     setDismissedNew(false)
@@ -552,6 +559,13 @@ function Mailbox({ ctx, identity, profile, queryPrefix: connectionPrefix, status
         client.setQueryData([...queryPrefix, scope, 'detail', messageId], current => current?.id === messageId ? { ...current, labelIds: result.labelIds } : current)
         setReadFeedback(null)
       }
+      // A verified read-on-open clears that message's "new" flag immediately.
+      setNewIds(current => {
+        if (!current.has(messageId)) return current
+        const next = new Set(current)
+        next.delete(messageId)
+        return next
+      })
     } catch {
       // A failed request must not poison the per-message dedupe set. The
       // selection guard below still prevents stale feedback on another message;
@@ -758,6 +772,16 @@ function Mailbox({ ctx, identity, profile, queryPrefix: connectionPrefix, status
       if (mounted.current) {
         setFeedback({ text: 'Gmail action verified by readback. Message ID: ' + result.id })
         if (approved.preview.action === 'send') { setDraft({ to: '', cc: '', subject: '', body: '' }); setCompose(false) }
+        // An acted message is no longer "new": card read/unread/star/trash and
+        // batch members leave the badge right away, before the refetch settles.
+        const acted = approved.preview.action === 'batch'
+          ? (result.ids || approved.preview.messages?.map(item => item.id) || [])
+          : [approved.preview.message?.id || approved.preview.messageId].filter(Boolean)
+        if (acted.length) setNewIds(current => {
+          const next = new Set(current)
+          for (const id of acted) next.delete(id)
+          return next
+        })
         if (approved.preview.action === 'trash' && live.current.selected === approved.preview.message?.id) setSelected('')
         if (approved.preview.action === 'batch') {
           setSelectedIds(new Set())
