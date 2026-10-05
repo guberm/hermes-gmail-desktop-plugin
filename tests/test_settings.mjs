@@ -24,7 +24,9 @@ const interval = loadFunction('autoRefreshInterval', 'shouldConfirmDelete')
 const confirmDelete = loadFunction('shouldConfirmDelete', null)
 const toggleSelection = loadFunction('toggleMessageSelection', 'gmailSettings', 'const BATCH_LIMIT = 20')
 const starChange = loadFunction('starLabelChange', 'contextText')
-const chips = loadFunction('userLabelChips', 'formatAttachmentSize', 'const SYSTEM_CHIP_LABELS = new Set([\'INBOX\', \'UNREAD\', \'SENT\', \'DRAFT\', \'TRASH\', \'IMPORTANT\', \'SPAM\', \'STARRED\', \'CATEGORY_PERSONAL\', \'CATEGORY_SOCIAL\', \'CATEGORY_UPDATES\', \'CATEGORY_FORUMS\', \'CATEGORY_PROMOTIONS\'])')
+const chips = loadFunction('userLabelChips', 'senderName', 'const SYSTEM_CHIP_LABELS = new Set([\'INBOX\', \'UNREAD\', \'SENT\', \'DRAFT\', \'TRASH\', \'IMPORTANT\', \'SPAM\', \'STARRED\', \'CATEGORY_PERSONAL\', \'CATEGORY_SOCIAL\', \'CATEGORY_UPDATES\', \'CATEGORY_FORUMS\', \'CATEGORY_PROMOTIONS\'])')
+const nameOf = loadFunction('senderName', 'shortDate')
+const dateOf = loadFunction('shortDate', 'formatAttachmentSize')
 const sizeFmt = loadFunction('formatAttachmentSize', 'newMessageIds')
 const newIds = loadFunction('newMessageIds', 'menuSetting')
 
@@ -135,4 +137,20 @@ test('new-mail diff finds unseen ids, bounded, robust to non-sets', () => {
   assert.deepEqual(newIds(new Set(['a']), 'not-a-list'), [])
   const many = newIds(new Set(), Array.from({ length: 50 }, (_, i) => `m${i}`))
   assert.equal(many.length, 20)
+})
+
+test('sender name extraction mirrors the Telegram bot GetSenderName', () => {
+  assert.equal(nameOf('Amazon <ship-confirm@amazon.com>'), 'Amazon')
+  assert.equal(nameOf('"Support, AWS" <no-reply@aws.com>'), 'Support, AWS')
+  assert.equal(nameOf('bare@example.com'), 'bare@example.com')
+  assert.equal(nameOf(''), '(unknown sender)')
+  assert.equal(nameOf(null), '(unknown sender)')
+  assert.equal(nameOf('Plain Name'), 'Plain Name')
+})
+
+test('short date renders local YYYY-MM-DD HH:MM and falls back to raw', () => {
+  assert.equal(dateOf('Sat, 26 Sep 2026 12:00:00 -0400').length, 16)
+  assert.equal(dateOf('Sat, 26 Sep 2026 12:00:00 -0400'), dateOf(new Date('Sat, 26 Sep 2026 16:00:00 +0000').toString()))
+  assert.equal(dateOf('not a date'), 'not a date')
+  assert.equal(dateOf(''), '')
 })

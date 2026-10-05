@@ -1,6 +1,6 @@
 name: gmail
-version: 1.0.14
-description: Gmail mailbox with profile-bound read-on-open, privacy-gated images, responsive safe email rendering, reviewed mailbox actions, attachments, label chips, and new-mail alerts.
+version: 1.0.15
+description: Gmail mailbox with Telegram-style message cards and detail view, attachments, label chips, new-mail alerts, and reviewed mailbox actions.
 manifest_version: 1
 kind: standalone
 author: Michael Guber

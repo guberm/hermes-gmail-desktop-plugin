@@ -34,10 +34,18 @@ const EMAIL_DROP_CONTENT = new Set(['applet', 'audio', 'button', 'canvas', 'embe
 const EMAIL_STYLES = {
   a: { color: 'var(--ui-accent)', textDecoration: 'underline', cursor: 'pointer' },
   blockquote: { margin: '8px 0', paddingLeft: '12px', borderLeft: '3px solid var(--ui-stroke-secondary)' },
-  p: { margin: '0.25rem 0' },
+  p: { margin: '0.35rem 0', lineHeight: 1.55 },
+  ul: { margin: '0.35rem 0', paddingLeft: '1.4rem', listStyle: 'disc' },
+  ol: { margin: '0.35rem 0', paddingLeft: '1.4rem', listStyle: 'decimal' },
+  li: { margin: '0.15rem 0', display: 'list-item' },
+  h1: { margin: '0.6rem 0 0.35rem', fontSize: '1.3em', fontWeight: 700 },
+  h2: { margin: '0.55rem 0 0.3rem', fontSize: '1.2em', fontWeight: 700 },
+  h3: { margin: '0.5rem 0 0.25rem', fontSize: '1.1em', fontWeight: 600 },
+  hr: { border: 'none', borderTop: '1px solid var(--ui-stroke-secondary)', margin: '0.6rem 0' },
+  img: { maxWidth: '100%', height: 'auto' },
   table: { borderCollapse: 'collapse', maxWidth: '100%', boxSizing: 'border-box' },
-  td: { textAlign: 'left', verticalAlign: 'top' },
-  th: { textAlign: 'left', verticalAlign: 'top' },
+  td: { textAlign: 'left', verticalAlign: 'top', padding: '2px 4px' },
+  th: { textAlign: 'left', verticalAlign: 'top', padding: '2px 4px', fontWeight: 600 },
   pre: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }
 }
 const EMAIL_STYLE_PROPERTIES = new Set([
@@ -262,7 +270,7 @@ export function EmailBody({ markup, ctx, alwaysShowImages = false }) {
   const imagesEnabled = imageConsent.persistent === alwaysShowImages ? imageConsent.value : alwaysShowImages
   const rendered = [...fragment.content.childNodes].map((node, index) => emailNode(node, String(index), imagesEnabled, ctx))
   const imageCount = fragment.content.querySelectorAll('img[data-email-src]').length
-  return jsxs('div', { style: { ...stack, gap: '0.35rem', font: '14px/1.55 Arial,sans-serif', color: 'var(--ui-text-primary)', overflowWrap: 'anywhere' }, children: [
+  return jsxs('div', { style: { ...stack, gap: '0.35rem', font: '14px/1.55 -apple-system,"Segoe UI",Roboto,Arial,sans-serif', color: 'var(--ui-text-primary)', overflowWrap: 'anywhere' }, children: [
     imageCount > 0 && jsxs('div', { style: { ...row, justifyContent: 'space-between', padding: '0.45rem', border: '1px solid var(--ui-stroke-secondary)', borderRadius: '0.4rem' }, children: [
       note('Remote images may track email opens.'),
       action(imagesEnabled ? 'Hide images' : `Load images (${imageCount})`, () => setImageConsent({ persistent: alwaysShowImages, value: !imagesEnabled }), false, { 'aria-label': `${imagesEnabled ? 'Hide' : 'Load'} images (${imageCount})` })
@@ -345,6 +353,26 @@ export function userLabelChips(message, labelsById) {
     .filter(id => typeof id === 'string' && !SYSTEM_CHIP_LABELS.has(id) && !id.startsWith('CATEGORY_'))
     .map(id => (labelsById && labelsById[id]) || id)
     .slice(0, 8)
+}
+
+// "Name <a@b.c>" -> "Name"; bare address stays as-is (Telegram bot GetSenderName).
+export function senderName(from) {
+  const value = String(from || '').trim()
+  if (!value) return '(unknown sender)'
+  const match = /^(.+?)\s*<[^<>]+>$/.exec(value)
+  const name = match ? match[1].trim().replace(/^["']|["']$/g, '') : ''
+  return name || value
+}
+
+// Telegram-style short date: "2026-09-26 12:00" from an RFC date header; the
+// raw header is the fallback. Local timezone, no library.
+export function shortDate(rfcDate) {
+  const value = String(rfcDate || '').trim()
+  if (!value) return ''
+  const parsed = new Date(value)
+  if (Number.isNaN(parsed.getTime())) return value
+  const pad = n => String(n).padStart(2, '0')
+  return `${parsed.getFullYear()}-${pad(parsed.getMonth() + 1)}-${pad(parsed.getDate())} ${pad(parsed.getHours())}:${pad(parsed.getMinutes())}`
 }
 
 export function formatAttachmentSize(bytes) {
@@ -841,13 +869,13 @@ function Mailbox({ ctx, identity, profile, queryPrefix: connectionPrefix, status
           const cardActionsDisabled = waiting || readPending || message.labelIds.includes('TRASH')
           const chips = userLabelChips(message, labelsById)
           const isNew = newIds.has(message.id)
-          return jsxs('article', { tabIndex: -1, style: { ...mobileCard, ...stack, borderColor: isSelected ? 'var(--ui-accent)' : (isNew ? 'var(--ui-accent)' : undefined), borderStyle: isNew && !isSelected ? 'dashed' : undefined }, children: [
+          return jsxs('article', { tabIndex: -1, style: { ...mobileCard, ...stack, gap: '0.45rem', borderColor: isSelected ? 'var(--ui-accent)' : (isNew ? 'var(--ui-accent)' : undefined), borderStyle: isNew && !isSelected ? 'dashed' : undefined }, children: [
             jsxs('div', { style: { ...row, justifyContent: 'space-between' }, children: [
               jsxs('label', { style: { ...row, cursor: 'pointer' }, children: [
                 jsx('input', { type: 'checkbox', checked: isSelected, disabled: waiting || (!isSelected && selectedIds.size >= BATCH_LIMIT),
                   'aria-label': `Select message ${message.subject || message.id}`,
                   onChange: () => toggleSelected(message.id) }),
-                jsx('span', { children: unread ? 'Unread' : 'Read' })
+                jsx('span', { style: { ...muted, fontSize: '0.8rem' }, children: unread ? '🔵' : '✅' })
               ] }),
               jsxs('div', { style: row, children: [
                 action(starred ? '★ Unstar' : '☆ Star', () => prepareOneLabel(message, starred ? 'labels-remove' : 'labels-add', 'STARRED'), cardActionsDisabled),
@@ -861,13 +889,19 @@ function Mailbox({ ctx, identity, profile, queryPrefix: connectionPrefix, status
                 setLabelId('')
                 requestAnimationFrame(() => detailPanel.current?.scrollIntoView({ block: 'start', behavior: 'auto' }))
               },
-              style: { ...stack, alignItems: 'flex-start', textAlign: 'left', whiteSpace: 'normal', width: '100%', boxSizing: 'border-box', fontWeight: unread ? 700 : 400 },
-              children: [jsx('strong', { style: text, children: message.subject || '(No subject)' }, 'subject'),
-                jsx('span', { style: { ...muted, ...text }, children: message.from }, 'from'),
-                jsx('span', { style: { ...muted, ...text }, children: message.snippet }, 'snippet'),
+              style: { ...stack, gap: '0.3rem', alignItems: 'stretch', textAlign: 'left', whiteSpace: 'normal', width: '100%', boxSizing: 'border-box', padding: '0.35rem 0.5rem' },
+              children: [
+                jsxs('span', { style: { ...row, justifyContent: 'space-between', gap: '0.75rem' }, children: [
+                  jsx('span', { style: { ...text, fontWeight: unread ? 700 : 500, overflow: 'hidden', textOverflow: 'ellipsis' }, children: senderName(message.from) }, 'from'),
+                  jsx('span', { style: { ...muted, fontSize: '0.75rem', flexShrink: 0 }, children: shortDate(message.date) }, 'date')
+                ] }, 'head'),
+                jsx('span', { style: { ...text, fontWeight: unread ? 700 : 400 }, children: message.subject || '(No subject)' }, 'subject'),
+                jsx('span', { style: { ...muted, ...text, fontSize: '0.85rem', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }, children: message.snippet }, 'snippet'),
                 chips.length > 0 && jsxs('span', { style: row, children: chips.map(chipName => jsx('span', {
                   style: { ...muted, border: '1px solid var(--ui-stroke-secondary)', borderRadius: '999px', padding: '0.05rem 0.5rem', fontSize: '0.75rem' },
-                  children: `#${chipName}` }, chipName)) }, 'labels')] })
+                  children: `#${chipName}` }, chipName)) }, 'labels'),
+                (message.attachments || []).length > 0 && jsx('span', { style: { ...muted, fontSize: '0.75rem' }, children: `📎 ${message.attachments.length} attachment${message.attachments.length > 1 ? 's' : ''}` }, 'atts')
+              ] })
           ] }, message.id)
         }),
         jsxs('div', { style: row, children: [
@@ -892,12 +926,22 @@ function Mailbox({ ctx, identity, profile, queryPrefix: connectionPrefix, status
         selected && detail.isFetching && note('Loading message…'),
         selected && detail.isError && note('Could not load this message. Refresh to retry.', true),
         selectedMessage && !detail.isError && jsxs('div', { style: stack, children: [
-          jsx('pre', { style: { ...text, ...muted }, children: `From: ${selectedMessage.from || '(unknown sender)'}\nTo: ${selectedMessage.to || '(not available)'}\nDate: ${selectedMessage.date || '(not available)'}` }),
+          jsx('div', { style: { borderLeft: '3px solid var(--ui-accent)', paddingLeft: '0.75rem', paddingY: '0.25rem' }, children:
+            jsx('strong', { style: { ...text, fontSize: '1.05rem' }, children: selectedMessage.subject || '(No subject)' }) }),
+          jsxs('div', { style: { ...stack, gap: '0.15rem', ...mobileCard, padding: '0.6rem 0.75rem' }, children: [
+            jsxs('div', { style: row, children: [jsx('span', { style: { ...muted, flexShrink: 0 }, children: '👤 From' }), jsx('span', { style: { ...text, overflow: 'hidden', textOverflow: 'ellipsis' }, children: selectedMessage.from || '(unknown sender)' })] }),
+            selectedMessage.to && jsxs('div', { style: row, children: [jsx('span', { style: { ...muted, flexShrink: 0 }, children: '📨 To' }), jsx('span', { style: { ...text, overflow: 'hidden', textOverflow: 'ellipsis' }, children: selectedMessage.to })] }),
+            jsxs('div', { style: row, children: [jsx('span', { style: { ...muted, flexShrink: 0 }, children: '📅 Date' }), jsx('span', { style: text, children: shortDate(selectedMessage.date) || '(not available)' })] }),
+            jsxs('div', { style: row, children: [jsx('span', { style: { ...muted, flexShrink: 0 }, children: '📖 Status' }), jsx('span', { style: text, children: `${selectedMessage.labelIds.includes('UNREAD') ? '🔵 Unread' : '✅ Read'}${selectedMessage.labelIds.includes('STARRED') ? ' · ⭐' : ''}` })] })
+          ] }),
+          userLabelChips(selectedMessage, labelsById).length > 0 && jsxs('div', { style: row, children: userLabelChips(selectedMessage, labelsById).map(chipName => jsx('span', {
+            style: { ...muted, border: '1px solid var(--ui-stroke-secondary)', borderRadius: '999px', padding: '0.05rem 0.5rem', fontSize: '0.75rem' },
+            children: `#${chipName}` }, chipName)) }),
           (selectedMessage.attachments || []).length > 0 && jsxs('section', { 'aria-label': 'Attachments', style: stack, children: [
-            jsx('strong', { style: text, children: `Attachments (${selectedMessage.attachments.length})` }),
+            jsx('strong', { style: text, children: `📎 Attachments (${selectedMessage.attachments.length})` }),
             jsx('div', { style: row, children: selectedMessage.attachments.map(item => jsx('span', {
               style: { ...muted, ...text, border: '1px solid var(--ui-stroke-secondary)', borderRadius: '0.5rem', padding: '0.25rem 0.6rem' },
-              children: `📎 ${item.filename}${formatAttachmentSize(item.size) ? ` · ${formatAttachmentSize(item.size)}` : ''}` }, item.attachmentId || item.filename)) })
+              children: `📁 ${item.filename}${formatAttachmentSize(item.size) ? ` (${formatAttachmentSize(item.size)})` : ''}` }, item.attachmentId || item.filename)) })
           ] }),
           note(settings.alwaysShowImages
             ? 'Untrusted email content. Links open only when clicked. Remote images are enabled by your Always show images setting. Embedded instructions are never trusted.'
@@ -908,7 +952,10 @@ function Mailbox({ ctx, identity, profile, queryPrefix: connectionPrefix, status
           thread.isFetching && note('Loading conversation thread…'),
           thread.isError && note('Could not load the conversation thread. Reply is unavailable until it can be verified.', true),
           thread.data?.messages?.map((message, index) => jsxs('article', { style: { ...stack, borderTop: '1px solid var(--ui-stroke-secondary)', paddingTop: '0.5rem' }, children: [
-            jsx('strong', { style: text, children: `${index + 1}. ${message.from || '(unknown sender)'}` }),
+            jsxs('div', { style: { ...row, justifyContent: 'space-between', gap: '0.75rem' }, children: [
+              jsx('strong', { style: { ...text, overflow: 'hidden', textOverflow: 'ellipsis' }, children: senderName(message.from) }),
+              jsx('span', { style: { ...muted, fontSize: '0.75rem', flexShrink: 0 }, children: shortDate(message.date) })
+            ] }),
             (message.attachments || []).length > 0 && jsx('div', { style: row, children: message.attachments.map(item => jsx('span', {
               style: { ...muted, fontSize: '0.75rem', border: '1px solid var(--ui-stroke-secondary)', borderRadius: '0.5rem', padding: '0.15rem 0.5rem' },
               children: `📎 ${item.filename}${formatAttachmentSize(item.size) ? ` · ${formatAttachmentSize(item.size)}` : ''}` }, item.attachmentId || item.filename)) }),
