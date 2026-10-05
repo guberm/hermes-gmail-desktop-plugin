@@ -785,6 +785,7 @@ function Mailbox({ ctx, identity, profile, queryPrefix: connectionPrefix, status
     } catch { setFeedback({ error: true, text: 'Clipboard unavailable. Nothing copied.' }) }
   }
   const selectedMessage = detail.data
+  const starredSelected = !!selectedMessage?.labelIds?.includes('STARRED')
   const waiting = busy || !!ticket || statusUnavailable
   const changeDraft = key => value => setDraft(current => ({ ...current, [key]: value }))
   useEffect(() => {
@@ -967,6 +968,11 @@ function Mailbox({ ctx, identity, profile, queryPrefix: connectionPrefix, status
             message.bodyTruncated && note('This thread message is truncated at the safety limit; open in Gmail for the full text.')
           ] }, message.id)),
           !thread.isFetching && !thread.isError && !thread.data?.messages?.length && note('No thread messages are available.'),
+          jsxs('div', { style: { ...row, borderTop: '1px solid var(--ui-stroke-secondary)', paddingTop: '0.6rem' }, children: [
+            action('Back to Inbox', () => setSelected(''), waiting),
+            action(starredSelected ? '★ Unstar' : '☆ Star', () => selectedMessage && prepareOneLabel(selectedMessage, starredSelected ? 'labels-remove' : 'labels-add', 'STARRED'), waiting || !selectedMessage),
+            action('Delete', () => prepare('trash'), waiting || !selectedMessage || selectedMessage.labelIds.includes('TRASH'))
+          ] }),
           jsxs('div', { style: row, children: [
             action('Copy as untrusted context', copyContext, waiting),
             action('Reply', () => beginReply(selectedMessage, thread.data), waiting || !thread.data?.messages?.length),
