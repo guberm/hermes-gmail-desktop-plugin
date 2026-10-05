@@ -856,7 +856,9 @@ function Mailbox({ ctx, identity, profile, queryPrefix: connectionPrefix, status
       action('Clear selection', () => setSelectedIds(new Set()), waiting)
     ] }),
     jsxs('div', { style: { ...stack, alignItems: 'stretch' }, children: [
-      jsxs('section', { 'aria-label': 'Search results', style: { ...stack }, children: [
+      // Reading mode: when a message is open the list gets out of the way
+      // entirely (display:none) so the email owns the full pane height.
+      jsxs('section', { 'aria-label': 'Search results', hidden: !!selected, style: { ...stack, display: selected ? 'none' : 'flex' }, children: [
         jsxs('div', { style: { ...row, justifyContent: 'space-between' }, children: [jsx('h2', { style: { margin: 0 }, children: 'Inbox' }), jsx('span', { style: muted, children: results.data?.messages?.length ? `${results.data.messages.length} messages` : '' })] }),
         results.isFetching && note('Loading messages…'),
         results.isError ? note('Could not load messages. Refresh mail or reconnect the backend.', true) :
