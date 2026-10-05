@@ -270,7 +270,7 @@ export function EmailBody({ markup, ctx, alwaysShowImages = false }) {
   const imagesEnabled = imageConsent.persistent === alwaysShowImages ? imageConsent.value : alwaysShowImages
   const rendered = [...fragment.content.childNodes].map((node, index) => emailNode(node, String(index), imagesEnabled, ctx))
   const imageCount = fragment.content.querySelectorAll('img[data-email-src]').length
-  return jsxs('div', { style: { ...stack, gap: '0.35rem', font: '14px/1.55 -apple-system,"Segoe UI",Roboto,Arial,sans-serif', color: 'var(--ui-text-primary)', overflowWrap: 'anywhere' }, children: [
+  return jsxs('div', { 'data-selectable-text': 'true', style: { ...stack, gap: '0.35rem', font: '14px/1.55 -apple-system,"Segoe UI",Roboto,Arial,sans-serif', color: 'var(--ui-text-primary)', overflowWrap: 'anywhere' }, children: [
     imageCount > 0 && jsxs('div', { style: { ...row, justifyContent: 'space-between', padding: '0.45rem', border: '1px solid var(--ui-stroke-secondary)', borderRadius: '0.4rem' }, children: [
       note('Remote images may track email opens.'),
       action(imagesEnabled ? 'Hide images' : `Load images (${imageCount})`, () => setImageConsent({ persistent: alwaysShowImages, value: !imagesEnabled }), false, { 'aria-label': `${imagesEnabled ? 'Hide' : 'Load'} images (${imageCount})` })
@@ -923,7 +923,7 @@ function Mailbox({ ctx, identity, profile, queryPrefix: connectionPrefix, status
 
           ] })
         ] }),
-        jsx('div', { ref: detailScroll, style: { ...stack, overflowY: 'auto', padding: '1rem', flex: '1 1 auto' }, children: [
+        jsx('div', { ref: detailScroll, 'data-selectable-text': 'true', style: { ...stack, overflowY: 'auto', padding: '1rem', flex: '1 1 auto' }, children: [
         jsx('h2', { tabIndex: -1, style: { margin: 0 }, children: selectedMessage?.subject || 'Message detail' }),
         !selected && note('Select a message to read it.'),
         selected && detail.isFetching && note('Loading message…'),
