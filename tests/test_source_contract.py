@@ -110,11 +110,13 @@ class ShippedSourceContractTests(unittest.TestCase):
         self.assertIn("refetchInterval: autoRefreshInterval(settings)", self.plugin_text)
         self.assertIn("inboxQuery(search.q, settings.unreadOnly)", self.plugin_text)
         self.assertIn("DropdownMenuTrigger", self.plugin_text)
-        for label in ("Auto-refresh every 60 seconds", "Show unread only", "Confirm before deleting"):
+        for label in ("Auto-refresh every 60 seconds", "Show unread only", "Confirm every action (send, archive, trash, labels)"):
             self.assertIn(label, self.plugin_text)
         self.assertIn("prepare('trash')", self.plugin_text)
         self.assertIn("await commit(commitWithoutPrompt)", self.plugin_text)
-        self.assertIn("shouldConfirmDelete(current.settings)", self.plugin_text)
+        self.assertIn("shouldConfirmAction(current.settings)", self.plugin_text)
+        # One master switch governs every confirmation path.
+        self.assertEqual(self.plugin_text.count("shouldConfirmAction(current.settings)"), 3)
 
     def test_more_read_state_actions_use_confirmed_label_pipeline(self):
         self.assertIn("Mark as unread (review first)", self.plugin_text)
@@ -132,7 +134,7 @@ class ShippedSourceContractTests(unittest.TestCase):
         self.assertIn('expected_labels_for_action(ticket.action, ticket.message_snapshot, payload)', self.backend_text)
 
     def test_package_version_bumped(self):
-        self.assertIn('version: 1.0.15', (ROOT / 'plugins/gmail/plugin.yaml').read_text(encoding='utf-8'))
+        self.assertIn('version: 1.0.16', (ROOT / 'plugins/gmail/plugin.yaml').read_text(encoding='utf-8'))
 
 if __name__ == "__main__":
     unittest.main()

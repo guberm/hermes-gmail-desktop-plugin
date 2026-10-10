@@ -288,7 +288,7 @@ export function GmailThreadAction({ account, threadId, ctx, disabled = false }) 
 
 const ID = 'gmail'
 const BATCH_LIMIT = 20
-const DEFAULT_SETTINGS = Object.freeze({ autoRefresh: false, unreadOnly: false, deleteConfirmation: true, alwaysShowImages: false })
+const DEFAULT_SETTINGS = Object.freeze({ autoRefresh: false, unreadOnly: false, confirmActions: true, alwaysShowImages: false })
 const stack = { display: 'flex', flexDirection: 'column', gap: '0.75rem', minWidth: 0 }
 const row = { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '0.5rem' }
 const text = { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', font: 'inherit', margin: 0 }
@@ -329,8 +329,8 @@ export function autoRefreshInterval(settings) {
   return settings.autoRefresh ? 60000 : false
 }
 
-export function shouldConfirmDelete(settings) {
-  return settings.deleteConfirmation
+export function shouldConfirmAction(settings) {
+  return settings.confirmActions
 }
 
 export function toggleMessageSelection(selection, messageId) {
@@ -650,7 +650,7 @@ function Mailbox({ ctx, identity, profile, queryPrefix: connectionPrefix, status
       } })
       if (prepared.scope !== scope || !prepared.confirmationToken || !prepared.preview ||
           prepared.preview.messages?.length !== current.selectedIds.size) throw new Error('Invalid batch preview')
-      if (operation === 'trash' && !shouldConfirmDelete(current.settings)) commitWithoutPrompt = prepared
+      if (!shouldConfirmAction(current.settings)) commitWithoutPrompt = prepared
       else if (mounted.current) setTicket(prepared)
     } catch {
       if (mounted.current) setFeedback({ error: true, text: 'Could not prepare the selected-message action. No change requested. Refresh Gmail and try again.' })
@@ -703,7 +703,7 @@ function Mailbox({ ctx, identity, profile, queryPrefix: connectionPrefix, status
             JSON.stringify(preview.removeLabelIds) !== '["UNREAD"]')))
         throw new Error('Invalid card action preview')
       const approved = { ...prepared, cardAction: kind === 'trash' ? 'trash' : 'read' }
-      if (kind === 'trash' && !shouldConfirmDelete(current.settings)) commitWithoutPrompt = approved
+      if (!shouldConfirmAction(current.settings)) commitWithoutPrompt = approved
       else if (mounted.current) setTicket(approved)
     } catch {
       if (mounted.current) setFeedback({ error: true, text: 'Could not prepare this message action. No change requested. Refresh Gmail and try again.' })
@@ -752,7 +752,7 @@ function Mailbox({ ctx, identity, profile, queryPrefix: connectionPrefix, status
     try {
       const prepared = await mutation.mutateAsync({ path: '/actions/prepare', body })
       if (prepared.scope !== scope || !prepared.confirmationToken || !prepared.preview) throw new Error('Invalid preview')
-      if (mounted.current && kind === 'trash' && !shouldConfirmDelete(current.settings)) commitWithoutPrompt = prepared
+      if (mounted.current && !shouldConfirmAction(current.settings)) commitWithoutPrompt = prepared
       else if (mounted.current) setTicket(prepared)
     } catch {
       if (mounted.current) setFeedback({ error: true, text: 'Could not prepare action. No change requested. Check the fields, refresh Gmail, and try again.' })
@@ -841,14 +841,14 @@ function Mailbox({ ctx, identity, profile, queryPrefix: connectionPrefix, status
             jsx('div', { style: { padding: '0.35rem 0.55rem', ...muted }, children: 'Settings' }),
             menuSetting('Auto-refresh every 60 seconds', settings.autoRefresh, () => toggleSetting('autoRefresh')),
             menuSetting('Show unread only', settings.unreadOnly, () => toggleSetting('unreadOnly')),
-            menuSetting('Confirm before deleting', settings.deleteConfirmation, () => toggleSetting('deleteConfirmation')),
+            menuSetting('Confirm every action (send, archive, trash, labels)', settings.confirmActions, () => toggleSetting('confirmActions'), { 'aria-label': 'Confirm every Gmail action. Turn off to commit actions without the review dialog; the backend ticket and readback still run.' }),
             menuSetting('Always show images - remote images may track opens', settings.alwaysShowImages, () => toggleSetting('alwaysShowImages'), { 'aria-label': 'Always show images. Remote images may track email opens.' }),
             jsx(DropdownMenuSeparator, {}),
             jsx('div', { style: { padding: '0.35rem 0.55rem', ...muted }, children: 'Selected message' }),
             jsx(DropdownMenuItem, { disabled: waiting || !selectedMessage || selectedMessage.labelIds.includes('UNREAD'),
-              onClick: () => { void prepare('labels-add', 'UNREAD') }, children: 'Mark as unread (review first)' }),
+              onClick: () => { void prepare('labels-add', 'UNREAD') }, children: settings.confirmActions ? 'Mark as unread (review first)' : 'Mark as unread' }),
             jsx(DropdownMenuItem, { disabled: waiting || !selectedMessage || !selectedMessage.labelIds.includes('UNREAD'),
-              onClick: () => { void prepare('labels-remove', 'UNREAD') }, children: 'Mark as read (review first)' })
+              onClick: () => { void prepare('labels-remove', 'UNREAD') }, children: settings.confirmActions ? 'Mark as read (review first)' : 'Mark as read' })
           ] })
         ] })
       ] })
@@ -860,7 +860,7 @@ function Mailbox({ ctx, identity, profile, queryPrefix: connectionPrefix, status
       jsx(Field, { label: 'Cc', value: draft.cc, onChange: changeDraft('cc'), maxLength: 4096, disabled: waiting }),
       jsx(Field, { label: 'Subject', value: draft.subject, onChange: changeDraft('subject'), maxLength: 998, disabled: waiting }),
       jsx(Field, { label: 'Message body', value: draft.body, onChange: changeDraft('body'), multiline: true, rows: 8, maxLength: 262144, disabled: waiting }),
-      jsx(Button, { type: 'submit', disabled: waiting || !draft.to, children: busy ? 'Preparing…' : 'Review send' })
+      jsx(Button, { type: 'submit', disabled: waiting || !draft.to, children: busy ? 'Preparing…' : (settings.confirmActions ? 'Review send' : 'Send') })
     ] }),
     jsxs('form', { style: row, onSubmit: e => { e.preventDefault(); setSearch({ q: draftQuery, pages: [''] }); setSelected(''); setSelectedIds(new Set()) }, children: [
       jsx(Field, { label: 'Search Gmail', value: draftQuery, onChange: setDraftQuery, maxLength: 512, disabled: waiting, placeholder: 'from:sender subject:topic' }),
@@ -1009,8 +1009,8 @@ function Mailbox({ ctx, identity, profile, queryPrefix: connectionPrefix, status
               onChange: e => setLabelId(e.target.value), children: [jsx('option', { value: '', children: 'Choose a label' }, 'none'),
                 ...(labels.data?.labels || []).filter(l => l.type === 'user').map(l => jsx('option', { value: l.id, children: l.name }, l.id))] })] }),
           jsxs('div', { style: row, children: [
-            action('Review add label', () => prepare('labels-add'), waiting || !labelId || selectedMessage.labelIds.includes(labelId)),
-            action('Review remove label', () => prepare('labels-remove'), waiting || !labelId || !selectedMessage.labelIds.includes(labelId))
+            action(settings.confirmActions ? 'Review add label' : 'Add label', () => prepare('labels-add'), waiting || !labelId || selectedMessage.labelIds.includes(labelId)),
+            action(settings.confirmActions ? 'Review remove label' : 'Remove label', () => prepare('labels-remove'), waiting || !labelId || !selectedMessage.labelIds.includes(labelId))
           ] })
         ] })
         ] })

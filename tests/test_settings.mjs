@@ -15,13 +15,13 @@ function loadFunction(name, nextName, prefix = '') {
   return Function(`${prefix}\n${fn}\nreturn ${name}`)()
 }
 
-const defaults = 'const DEFAULT_SETTINGS = Object.freeze({ autoRefresh: false, unreadOnly: false, deleteConfirmation: true, alwaysShowImages: false })'
+const defaults = 'const DEFAULT_SETTINGS = Object.freeze({ autoRefresh: false, unreadOnly: false, confirmActions: true, alwaysShowImages: false })'
 const settings = loadFunction('gmailSettings', 'settingsStorageKey', defaults)
 const storageKey = loadFunction('settingsStorageKey', 'toggleGmailSetting')
 const toggle = loadFunction('toggleGmailSetting', 'inboxQuery', defaults)
 const query = loadFunction('inboxQuery', 'autoRefreshInterval')
-const interval = loadFunction('autoRefreshInterval', 'shouldConfirmDelete')
-const confirmDelete = loadFunction('shouldConfirmDelete', null)
+const interval = loadFunction('autoRefreshInterval', 'shouldConfirmAction')
+const confirmAction = loadFunction('shouldConfirmAction', null)
 const toggleSelection = loadFunction('toggleMessageSelection', 'gmailSettings', 'const BATCH_LIMIT = 20')
 const starChange = loadFunction('starLabelChange', 'contextText')
 const chips = loadFunction('userLabelChips', 'senderName', 'const SYSTEM_CHIP_LABELS = new Set([\'INBOX\', \'UNREAD\', \'SENT\', \'DRAFT\', \'TRASH\', \'IMPORTANT\', \'SPAM\', \'STARRED\', \'CATEGORY_PERSONAL\', \'CATEGORY_SOCIAL\', \'CATEGORY_UPDATES\', \'CATEGORY_FORUMS\', \'CATEGORY_PROMOTIONS\'])')
@@ -31,9 +31,9 @@ const sizeFmt = loadFunction('formatAttachmentSize', 'newMessageIds')
 const newIds = loadFunction('newMessageIds', 'menuSetting')
 
 test('preference defaults and persisted booleans are explicit', () => {
-  assert.deepEqual(settings(null), { autoRefresh: false, unreadOnly: false, deleteConfirmation: true, alwaysShowImages: false })
-  assert.deepEqual(settings({ autoRefresh: true, unreadOnly: 'yes', deleteConfirmation: false, alwaysShowImages: true, unknown: true }),
-    { autoRefresh: true, unreadOnly: false, deleteConfirmation: false, alwaysShowImages: true })
+  assert.deepEqual(settings(null), { autoRefresh: false, unreadOnly: false, confirmActions: true, alwaysShowImages: false })
+  assert.deepEqual(settings({ autoRefresh: true, unreadOnly: 'yes', confirmActions: false, alwaysShowImages: true, unknown: true }),
+    { autoRefresh: true, unreadOnly: false, confirmActions: false, alwaysShowImages: true })
 })
 
 test('Always show images is independently toggleable and cannot change another preference', () => {
@@ -67,15 +67,24 @@ test('unread filter appends Gmail operator once and restores original query when
   assert.equal(query('', true), 'is:unread')
 })
 
-test('delete prompt defaults on; opt-out changes prompt only, not backend pipeline', () => {
+test('action confirmation defaults on; opt-out skips the dialog for every action, never the backend pipeline', () => {
   const enabled = settings(null)
-  const disabled = toggle(enabled, 'deleteConfirmation')
-  assert.equal(confirmDelete(enabled), true)
-  assert.equal(confirmDelete(disabled), false)
-  assert.match(source, /if \(mounted\.current && kind === 'trash' && !shouldConfirmDelete\(current\.settings\)\) commitWithoutPrompt = prepared/)
+  const disabled = toggle(enabled, 'confirmActions')
+  assert.equal(confirmAction(enabled), true)
+  assert.equal(confirmAction(disabled), false)
+  assert.equal(confirmAction(toggle(disabled, 'confirmActions')), true)
+  // Detail actions (send/archive/trash/labels), card actions and batch all
+  // route through the same master switch.
+  assert.match(source, /if \(mounted\.current && !shouldConfirmAction\(current\.settings\)\) commitWithoutPrompt = prepared/)
+  assert.match(source, /if \(!shouldConfirmAction\(current\.settings\)\) commitWithoutPrompt = approved/)
+  assert.match(source, /if \(!shouldConfirmAction\(current\.settings\)\) commitWithoutPrompt = prepared/)
+  assert.equal((source.match(/shouldConfirmAction\(current\.settings\)/g) || []).length, 3)
   assert.match(source, /await commit\(commitWithoutPrompt\)/)
   assert.match(source, /confirmationToken: approved\.confirmationToken, confirmed: true/)
   assert.match(source, /if \(result\.status !== 'verified'\)/)
+  // Labels reflect the setting instead of promising a review that is skipped.
+  assert.match(source, /settings\.confirmActions \? 'Review send' : 'Send'/)
+  assert.match(source, /settings\.confirmActions \? 'Review add label' : 'Add label'/)
 })
 
 test('More dropdown wires read-state actions to confirmed label preparation', () => {
