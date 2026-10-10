@@ -73,12 +73,20 @@ test('action confirmation defaults on; opt-out skips the dialog for every action
   assert.equal(confirmAction(enabled), true)
   assert.equal(confirmAction(disabled), false)
   assert.equal(confirmAction(toggle(disabled, 'confirmActions')), true)
-  // Detail actions (send/archive/trash/labels), card actions and batch all
-  // route through the same master switch.
+  // Detail actions (send/archive/trash/labels), card actions, card star/label
+  // and batch all route through the same master switch.
   assert.match(source, /if \(mounted\.current && !shouldConfirmAction\(current\.settings\)\) commitWithoutPrompt = prepared/)
   assert.match(source, /if \(!shouldConfirmAction\(current\.settings\)\) commitWithoutPrompt = approved/)
   assert.match(source, /if \(!shouldConfirmAction\(current\.settings\)\) commitWithoutPrompt = prepared/)
-  assert.equal((source.match(/shouldConfirmAction\(current\.settings\)/g) || []).length, 3)
+  assert.match(source, /if \(!shouldConfirmAction\(live\.current\.settings\)\) commitWithoutPrompt = prepared/)
+  assert.equal((source.match(/!shouldConfirmAction\(/g) || []).length, 4)
+  // No ticket-producing path may open the dialog unconditionally: all four
+  // guards (batch, star-label, card, detail) sit behind the master switch.
+  assert.equal((source.match(/else if \(mounted\.current\) setTicket\(/g) || []).length, 4)
+  // Every ticket opened for review is one of those four guarded calls
+  // (the only other setTicket calls clear the dialog).
+  assert.equal((source.match(/setTicket\((?:prepared|approved)\)/g) || []).length, 4)
+  assert.equal((source.match(/await commit\(commitWithoutPrompt\)/g) || []).length, 4)
   assert.match(source, /await commit\(commitWithoutPrompt\)/)
   assert.match(source, /confirmationToken: approved\.confirmationToken, confirmed: true/)
   assert.match(source, /if \(result\.status !== 'verified'\)/)

@@ -663,16 +663,19 @@ function Mailbox({ ctx, identity, profile, queryPrefix: connectionPrefix, status
     guard.current = true; setBusy(true); setFeedback(null)
     trigger.current = document.activeElement
     completedAction.current = null
+    let commitWithoutPrompt = null
     try {
       const change = starLabelChange(message)
       const prepared = await mutation.mutateAsync({ path: '/actions/prepare', body: {
         scope, action: 'labels', messageId: message.id, ...change
       } })
       if (prepared.scope !== scope || !prepared.confirmationToken || !prepared.preview) throw new Error('Invalid label preview')
-      if (mounted.current) setTicket(prepared)
+      if (!shouldConfirmAction(live.current.settings)) commitWithoutPrompt = prepared
+      else if (mounted.current) setTicket(prepared)
     } catch {
       if (mounted.current) setFeedback({ error: true, text: 'Could not prepare the star change. No change requested. Refresh Gmail and try again.' })
     } finally { mutation.reset(); guard.current = false; if (mounted.current) setBusy(false) }
+    if (commitWithoutPrompt && mounted.current) await commit(commitWithoutPrompt)
   }
 
   async function prepareCardAction(message, kind) {

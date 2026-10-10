@@ -1,5 +1,5 @@
 name: gmail
-version: 1.0.16
+version: 1.0.17
 description: Gmail mailbox with Telegram-style message cards and detail view, attachments, label chips, new-mail alerts, a master action-confirmation switch, and reviewed mailbox actions.
 manifest_version: 1
 kind: standalone

@@ -115,8 +115,14 @@ class ShippedSourceContractTests(unittest.TestCase):
         self.assertIn("prepare('trash')", self.plugin_text)
         self.assertIn("await commit(commitWithoutPrompt)", self.plugin_text)
         self.assertIn("shouldConfirmAction(current.settings)", self.plugin_text)
-        # One master switch governs every confirmation path.
-        self.assertEqual(self.plugin_text.count("shouldConfirmAction(current.settings)"), 3)
+        # One master switch governs every confirmation path: detail actions,
+        # batch, per-card actions and the card/detail star-label action.
+        self.assertEqual(self.plugin_text.count("!shouldConfirmAction("), 4)
+        self.assertEqual(self.plugin_text.count("else if (mounted.current) setTicket("), 4)
+        # Every ticket opened for review is one of those four guarded calls
+        # (the only other setTicket calls clear the dialog).
+        self.assertEqual(
+            self.plugin_text.count("setTicket(prepared)") + self.plugin_text.count("setTicket(approved)"), 4)
 
     def test_more_read_state_actions_use_confirmed_label_pipeline(self):
         self.assertIn("Mark as unread (review first)", self.plugin_text)
@@ -134,7 +140,7 @@ class ShippedSourceContractTests(unittest.TestCase):
         self.assertIn('expected_labels_for_action(ticket.action, ticket.message_snapshot, payload)', self.backend_text)
 
     def test_package_version_bumped(self):
-        self.assertIn('version: 1.0.16', (ROOT / 'plugins/gmail/plugin.yaml').read_text(encoding='utf-8'))
+        self.assertIn('version: 1.0.17', (ROOT / 'plugins/gmail/plugin.yaml').read_text(encoding='utf-8'))
 
 if __name__ == "__main__":
     unittest.main()
