@@ -15,13 +15,20 @@ function loadFunction(name, nextName, prefix = '') {
   return Function(`${prefix}\n${fn}\nreturn ${name}`)()
 }
 
-const defaults = 'const DEFAULT_SETTINGS = Object.freeze({ refreshSeconds: 0, unreadOnly: false, confirmActions: true, alwaysShowImages: false })\nconst REFRESH_SECONDS = Object.freeze([0, 300, 600, 900, 1800, 3600])\nconst DEFAULT_REFRESH_SECONDS = 300'
-const settings = loadFunction('gmailSettings', 'settingsStorageKey', defaults)
+const defaults = 'const DEFAULT_SETTINGS = Object.freeze({ refreshSeconds: 0, unreadOnly: false, confirmActions: true, alwaysShowImages: false })\nconst REFRESH_SECONDS = Object.freeze([0, 5, 10, 15, 30, 60])\nconst DEFAULT_REFRESH_SECONDS = 5'
+// gmailSettings migrates a stored interval through nearestRefreshSeconds, so
+// that helper has to be in scope for the extracted function too.
+const nearestSrc = source
+  .slice(source.indexOf('export function nearestRefreshSeconds('),
+    source.indexOf('export function shouldConfirmAction('))
+  .replace('export function', 'function')
+const settings = loadFunction('gmailSettings', 'settingsStorageKey', `${defaults}\n${nearestSrc}`)
 const storageKey = loadFunction('settingsStorageKey', 'toggleGmailSetting')
 const toggle = loadFunction('toggleGmailSetting', 'inboxQuery', defaults)
 const query = loadFunction('inboxQuery', 'autoRefreshInterval')
 const interval = loadFunction('autoRefreshInterval', 'refreshLabel')
-const label = loadFunction('refreshLabel', 'shouldConfirmAction', defaults)
+const label = loadFunction('refreshLabel', 'nearestRefreshSeconds', defaults)
+const nearest = loadFunction('nearestRefreshSeconds', 'shouldConfirmAction', defaults)
 const confirmAction = loadFunction('shouldConfirmAction', null)
 const toggleSelection = loadFunction('toggleMessageSelection', 'gmailSettings', 'const BATCH_LIMIT = 20')
 const starChange = loadFunction('starLabelChange', 'contextText')
@@ -33,15 +40,17 @@ const newIds = loadFunction('newMessageIds', 'menuSetting')
 
 test('preference defaults and persisted values are explicit', () => {
   assert.deepEqual(settings(null), { refreshSeconds: 0, unreadOnly: false, confirmActions: true, alwaysShowImages: false })
-  assert.deepEqual(settings({ refreshSeconds: 900, unreadOnly: 'yes', confirmActions: false, alwaysShowImages: true, unknown: true }),
-    { refreshSeconds: 900, unreadOnly: false, confirmActions: false, alwaysShowImages: true })
-  // Only an offered interval is accepted; a numeric string is normalised.
-  assert.equal(settings({ refreshSeconds: 42 }).refreshSeconds, 0)
-  assert.equal(settings({ refreshSeconds: '600' }).refreshSeconds, 600)
+  assert.deepEqual(settings({ refreshSeconds: 15, unreadOnly: 'yes', confirmActions: false, alwaysShowImages: true, unknown: true }),
+    { refreshSeconds: 15, unreadOnly: false, confirmActions: false, alwaysShowImages: true })
+  // Only an offered interval is accepted; an older value maps to the nearest,
+  // and a numeric string is normalised.
+  assert.equal(settings({ refreshSeconds: 300 }).refreshSeconds, 60)
+  assert.equal(settings({ refreshSeconds: '30' }).refreshSeconds, 30)
+  assert.equal(settings({ refreshSeconds: -5 }).refreshSeconds, 0)
   // A stored legacy boolean migrates to the smallest offered interval.
-  assert.equal(settings({ autoRefresh: true }).refreshSeconds, 300)
+  assert.equal(settings({ autoRefresh: true }).refreshSeconds, 5)
   assert.equal(settings({ autoRefresh: false }).refreshSeconds, 0)
-  assert.equal(settings({ autoRefresh: true, refreshSeconds: 1800 }).refreshSeconds, 1800)
+  assert.equal(settings({ autoRefresh: true, refreshSeconds: 15 }).refreshSeconds, 15)
 })
 
 test('Always show images is independently toggleable and cannot change another preference', () => {
@@ -60,22 +69,28 @@ test('settings persist under isolated profile and normalized account keys', () =
   assert.notEqual(storageKey('default', 'a@example.com'), storageKey('default', 'b@example.com'))
 })
 
-test('auto-refresh offers 5/10/15/30/60 minutes and maps to a poll interval', () => {
+test('auto-refresh offers 5/10/15/30/60 seconds and maps to a poll interval', () => {
   const offered = source.match(/const REFRESH_SECONDS = Object\.freeze\(\[([^\]]+)\]\)/)
   assert.ok(offered, 'the offered intervals are declared')
-  assert.deepEqual(offered[1].split(',').map(part => Number(part.trim())), [0, 300, 600, 900, 1800, 3600])
+  assert.deepEqual(offered[1].split(',').map(part => Number(part.trim())), [0, 5, 10, 15, 30, 60])
   assert.equal(interval(settings(null)), false)
   assert.deepEqual(
-    [[300, 300000], [600, 600000], [900, 900000], [1800, 1800000], [3600, 3600000]]
-      .map(([seconds]) => interval({ refreshSeconds: seconds })),
-    [300000, 600000, 900000, 1800000, 3600000])
+    [5, 10, 15, 30, 60].map(seconds => interval({ refreshSeconds: seconds })),
+    [5000, 10000, 15000, 30000, 60000])
   assert.equal(label(0), 'Manual only')
-  assert.equal(label(300), 'Every 5 minutes')
-  assert.equal(label(600), 'Every 10 minutes')
-  assert.equal(label(900), 'Every 15 minutes')
-  assert.equal(label(1800), 'Every 30 minutes')
-  assert.equal(label(3600), 'Every 1 hour')
+  assert.equal(label(5), 'Every 5 seconds')
+  assert.equal(label(10), 'Every 10 seconds')
+  assert.equal(label(15), 'Every 15 seconds')
+  assert.equal(label(30), 'Every 30 seconds')
+  assert.equal(label(60), 'Every 1 minute')
   assert.equal(label(42), 'Manual only')
+  // A stored interval that is no longer offered keeps a sane auto-refresh.
+  assert.equal(nearest(300), 60)
+  assert.equal(nearest(1800), 60)
+  assert.equal(nearest(4), 5)
+  assert.equal(nearest(45), 60)
+  assert.equal(nearest(0), 0)
+  assert.equal(nearest('nope'), 0)
 })
 
 test('unread filter appends Gmail operator once and restores original query when off', () => {

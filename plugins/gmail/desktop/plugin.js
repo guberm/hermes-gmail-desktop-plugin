@@ -291,8 +291,8 @@ const ID = 'gmail'
 const BATCH_LIMIT = 20
 const DEFAULT_SETTINGS = Object.freeze({ refreshSeconds: 0, unreadOnly: false, confirmActions: true, alwaysShowImages: false })
 // Offered auto-refresh intervals in seconds; 0 is manual-only.
-const REFRESH_SECONDS = Object.freeze([0, 300, 600, 900, 1800, 3600])
-const DEFAULT_REFRESH_SECONDS = 300
+const REFRESH_SECONDS = Object.freeze([0, 5, 10, 15, 30, 60])
+const DEFAULT_REFRESH_SECONDS = 5
 const stack = { display: 'flex', flexDirection: 'column', gap: '0.75rem', minWidth: 0 }
 const row = { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '0.5rem' }
 const text = { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', font: 'inherit', margin: 0 }
@@ -313,12 +313,14 @@ export function gmailSettings(value) {
   const settings = {}
   for (const key of Object.keys(DEFAULT_SETTINGS)) {
     if (key === 'refreshSeconds') {
-      // Only an offered interval is accepted. A stored legacy boolean
-      // (autoRefresh: true) migrates to the one-minute default; anything
-      // else falls back to manual-only.
+      // Only an offered interval is accepted; an older stored value (the
+      // minutes-based set) maps to the nearest one. A stored legacy boolean
+      // (autoRefresh: true) migrates to the smallest offered interval;
+      // anything else falls back to manual-only.
       const stored = Number(saved.refreshSeconds)
       settings.refreshSeconds = REFRESH_SECONDS.includes(stored) ? stored
-        : (saved.autoRefresh === true ? DEFAULT_REFRESH_SECONDS : 0)
+        : (Number.isFinite(stored) && stored > 0 ? nearestRefreshSeconds(stored)
+          : (saved.autoRefresh === true ? DEFAULT_REFRESH_SECONDS : 0))
     } else {
       settings[key] = typeof saved[key] === 'boolean' ? saved[key] : DEFAULT_SETTINGS[key]
     }
@@ -349,8 +351,27 @@ export function autoRefreshInterval(settings) {
 export function refreshLabel(seconds) {
   const value = Number(seconds)
   if (!REFRESH_SECONDS.includes(value) || value === 0) return 'Manual only'
-  if (value === 3600) return 'Every 1 hour'
-  return `Every ${value / 60} minutes`
+  if (value >= 60) return 'Every 1 minute'
+  return `Every ${value} seconds`
+}
+
+// A stored interval that is no longer offered (for example the older
+// minutes-based values) maps to the nearest one instead of silently turning
+// auto-refresh off. Ties go to the slower interval.
+export function nearestRefreshSeconds(value) {
+  const stored = Number(value)
+  if (!Number.isFinite(stored) || stored <= 0) return 0
+  let best = 0
+  let bestDistance = Infinity
+  for (const candidate of REFRESH_SECONDS) {
+    if (candidate === 0) continue
+    const distance = Math.abs(candidate - stored)
+    if (distance <= bestDistance) {
+      bestDistance = distance
+      best = candidate
+    }
+  }
+  return best
 }
 
 export function shouldConfirmAction(settings) {
@@ -878,7 +899,6 @@ function Mailbox({ ctx, identity, profile, queryPrefix: connectionPrefix, status
           jsx(DropdownMenuTrigger, { asChild: true, children: jsx(Button, { type: 'button', variant: 'outline', disabled: waiting, children: 'More' }) }),
           jsxs(DropdownMenuContent, { align: 'end', children: [
             jsx('div', { style: { padding: '0.35rem 0.55rem', ...muted }, children: 'Settings' }),
-            menuSetting('Auto-refresh every 60 seconds', settings.autoRefresh, () => toggleSetting('autoRefresh')),
             menuSetting('Show unread only', settings.unreadOnly, () => toggleSetting('unreadOnly')),
             menuSetting('Confirm every action (send, archive, trash, labels)', settings.confirmActions, () => toggleSetting('confirmActions'), { 'aria-label': 'Confirm every Gmail action. Turn off to commit actions without the review dialog; the backend ticket and readback still run.' }),
             menuSetting('Always show images - remote images may track opens', settings.alwaysShowImages, () => toggleSetting('alwaysShowImages'), { 'aria-label': 'Always show images. Remote images may track email opens.' }),

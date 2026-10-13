@@ -28,7 +28,7 @@ Each inbox message card has a **Mark as read** action when unread and a **Delete
 
 In Gmail, open the **More** dropdown in the mailbox header (available both in the inbox and message detail). The toggles save persistently for the current Hermes profile and Gmail account:
 
-- **Auto-refresh** — pick 5, 10, 15, 30 or 60 minutes, or **Manual only**; the choice is saved per profile and Gmail account and drives the mailbox poll interval.
+- **Auto-refresh** — pick **5, 10, 15, 30 or 60 seconds**, or **Manual only**; the choice is saved per profile and Gmail account and drives the mailbox poll interval. A stored interval that is no longer offered maps to the nearest one instead of silently turning polling off.
 - **Show unread only** — off by default; enable it to append Gmail's `is:unread` operator to the current search, or turn it off to return to the unfiltered search.
 - **Confirm every action (send, archive, trash, labels)** — on by default; turn it off to skip the on-screen review dialog for every Gmail action (send, reply, archive, trash, label changes, and bulk actions) so each click commits straight through; turn it back on to require the review dialog again. Actions remain deliberate button presses either way, action labels drop the "Review" wording while the dialog is skipped, and the backend prepare ticket, account/profile binding, exact message snapshot validation, and readback verification remain required in both modes.
 - **Always show images** — off by default; when enabled, remote HTML images load as messages open. Remote images may track opens. Turning the option off immediately removes image sources; the per-message **Load images (N)** action remains available.

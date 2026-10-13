@@ -110,8 +110,10 @@ class ShippedSourceContractTests(unittest.TestCase):
         self.assertIn("refetchInterval: autoRefreshInterval(settings)", self.plugin_text)
         self.assertIn("inboxQuery(search.q, settings.unreadOnly)", self.plugin_text)
         self.assertIn("DropdownMenuTrigger", self.plugin_text)
-        for label in ("Auto-refresh every 60 seconds", "Show unread only", "Confirm every action (send, archive, trash, labels)"):
+        for label in ("Show unread only", "Confirm every action (send, archive, trash, labels)",
+                      "Auto-refresh:", "Manual only", "Every ${value} seconds", "Every 1 minute"):
             self.assertIn(label, self.plugin_text)
+        self.assertNotIn("Auto-refresh every 60 seconds", self.plugin_text)
         self.assertIn("prepare('trash')", self.plugin_text)
         self.assertIn("await commit(commitWithoutPrompt)", self.plugin_text)
         self.assertIn("shouldConfirmAction(current.settings)", self.plugin_text)
@@ -171,7 +173,7 @@ class ShippedSourceContractTests(unittest.TestCase):
         self.assertEqual(self.plugin_text.count("action(unreadSelected ? 'Mark as read' : 'Mark as unread'"), 2)
 
     def test_package_version_bumped(self):
-        self.assertIn('version: 1.0.19', (ROOT / 'plugins/gmail/plugin.yaml').read_text(encoding='utf-8'))
+        self.assertIn('version: 1.0.20', (ROOT / 'plugins/gmail/plugin.yaml').read_text(encoding='utf-8'))
 
 if __name__ == "__main__":
     unittest.main()
