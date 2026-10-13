@@ -1,5 +1,6 @@
 import { host, useValue, useQuery, useMutation, useQueryClient, Button, Input, Textarea,
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter,
+  ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger,
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger,
   ROUTES_AREA, SIDEBAR_NAV_AREA, PALETTE_AREA } from '@hermes/plugin-sdk'
 import { useState, useRef, useEffect, useLayoutEffect } from 'react'
@@ -288,7 +289,10 @@ export function GmailThreadAction({ account, threadId, ctx, disabled = false }) 
 
 const ID = 'gmail'
 const BATCH_LIMIT = 20
-const DEFAULT_SETTINGS = Object.freeze({ autoRefresh: false, unreadOnly: false, confirmActions: true, alwaysShowImages: false })
+const DEFAULT_SETTINGS = Object.freeze({ refreshSeconds: 0, unreadOnly: false, confirmActions: true, alwaysShowImages: false })
+// Offered auto-refresh intervals in seconds; 0 is manual-only.
+const REFRESH_SECONDS = Object.freeze([0, 300, 600, 900, 1800, 3600])
+const DEFAULT_REFRESH_SECONDS = 300
 const stack = { display: 'flex', flexDirection: 'column', gap: '0.75rem', minWidth: 0 }
 const row = { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '0.5rem' }
 const text = { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', font: 'inherit', margin: 0 }
@@ -306,8 +310,20 @@ const usableFocus = el => el?.isConnected && el !== document.body && el !== docu
 
 export function gmailSettings(value) {
   const saved = value && typeof value === 'object' && !Array.isArray(value) ? value : {}
-  return Object.fromEntries(Object.keys(DEFAULT_SETTINGS).map(key => [key,
-    typeof saved[key] === 'boolean' ? saved[key] : DEFAULT_SETTINGS[key]]))
+  const settings = {}
+  for (const key of Object.keys(DEFAULT_SETTINGS)) {
+    if (key === 'refreshSeconds') {
+      // Only an offered interval is accepted. A stored legacy boolean
+      // (autoRefresh: true) migrates to the one-minute default; anything
+      // else falls back to manual-only.
+      const stored = Number(saved.refreshSeconds)
+      settings.refreshSeconds = REFRESH_SECONDS.includes(stored) ? stored
+        : (saved.autoRefresh === true ? DEFAULT_REFRESH_SECONDS : 0)
+    } else {
+      settings[key] = typeof saved[key] === 'boolean' ? saved[key] : DEFAULT_SETTINGS[key]
+    }
+  }
+  return settings
 }
 
 export function settingsStorageKey(profile, account) {
@@ -326,7 +342,15 @@ export function inboxQuery(query, unreadOnly) {
 }
 
 export function autoRefreshInterval(settings) {
-  return settings.autoRefresh ? 60000 : false
+  return settings.refreshSeconds > 0 ? settings.refreshSeconds * 1000 : false
+}
+
+// Human label for an offered interval (also drives the More menu rows).
+export function refreshLabel(seconds) {
+  const value = Number(seconds)
+  if (!REFRESH_SECONDS.includes(value) || value === 0) return 'Manual only'
+  if (value === 3600) return 'Every 1 hour'
+  return `Every ${value / 60} minutes`
 }
 
 export function shouldConfirmAction(settings) {
@@ -633,6 +657,12 @@ function Mailbox({ ctx, identity, profile, queryPrefix: connectionPrefix, status
     }
   }
 
+  // Auto-refresh is one of the offered intervals, not a boolean.
+  function setRefresh(seconds) {
+    if (!REFRESH_SECONDS.includes(seconds)) return
+    setSettings(current => ({ ...current, refreshSeconds: seconds }))
+  }
+
   function toggleSelected(messageId) {
     setSelectedIds(current => toggleMessageSelection(current, messageId))
   }
@@ -680,32 +710,37 @@ function Mailbox({ ctx, identity, profile, queryPrefix: connectionPrefix, status
 
   async function prepareCardAction(message, kind) {
     if (guard.current || live.current.statusUnavailable) return
+    const isUnread = Array.isArray(message?.labelIds) && message.labelIds.includes('UNREAD')
     if (!message?.id || !Array.isArray(message.labelIds) ||
-        (kind === 'labels-remove' && !message.labelIds.includes('UNREAD')) ||
+        (kind === 'labels-remove' && !isUnread) ||
+        (kind === 'labels-add' && isUnread) ||
         (kind === 'trash' && message.labelIds.includes('TRASH'))) return
     guard.current = true; setBusy(true); setFeedback(null)
     trigger.current = document.activeElement
     const card = trigger.current?.closest?.('article')
-    cardFocusTarget.current = kind === 'labels-remove'
-      ? [...(card?.querySelectorAll('button') || [])].find(button => button !== trigger.current && !button.disabled) || card
-      : null
+    cardFocusTarget.current = kind === 'trash' ? null
+      : [...(card?.querySelectorAll('button') || [])].find(button => button !== trigger.current && !button.disabled) || card
     completedAction.current = null
     const current = live.current
     let commitWithoutPrompt = null
     try {
       const body = kind === 'trash'
         ? { scope, action: 'trash', messageId: message.id }
-        : { scope, action: 'labels', messageId: message.id, addLabelIds: [], removeLabelIds: ['UNREAD'] }
+        : { scope, action: 'labels', messageId: message.id,
+            addLabelIds: kind === 'labels-add' ? ['UNREAD'] : [],
+            removeLabelIds: kind === 'labels-add' ? [] : ['UNREAD'] }
       const prepared = await mutation.mutateAsync({ path: '/actions/prepare', body })
       const expectedAction = kind === 'trash' ? 'trash' : 'labels'
+      const expectedAdd = kind === 'labels-add' ? '["UNREAD"]' : '[]'
+      const expectedRemove = kind === 'labels-add' ? '[]' : '["UNREAD"]'
       const preview = prepared?.preview
       if (prepared.scope !== scope || !prepared.confirmationToken || preview?.action !== expectedAction ||
           preview.message?.id !== message.id ||
           (kind === 'trash' && preview.effect !== 'Move this message to Trash') ||
-          (kind === 'labels' && (JSON.stringify(preview.addLabelIds) !== '[]' ||
-            JSON.stringify(preview.removeLabelIds) !== '["UNREAD"]')))
+          (kind !== 'trash' && (JSON.stringify(preview.addLabelIds) !== expectedAdd ||
+            JSON.stringify(preview.removeLabelIds) !== expectedRemove)))
         throw new Error('Invalid card action preview')
-      const approved = { ...prepared, cardAction: kind === 'trash' ? 'trash' : 'read' }
+      const approved = { ...prepared, cardAction: kind === 'trash' ? 'trash' : (kind === 'labels-add' ? 'unread' : 'read') }
       if (!shouldConfirmAction(current.settings)) commitWithoutPrompt = approved
       else if (mounted.current) setTicket(approved)
     } catch {
@@ -813,6 +848,7 @@ function Mailbox({ ctx, identity, profile, queryPrefix: connectionPrefix, status
   }
   const selectedMessage = detail.data
   const starredSelected = !!selectedMessage?.labelIds?.includes('STARRED')
+  const unreadSelected = !!selectedMessage?.labelIds?.includes('UNREAD')
   const waiting = busy || !!ticket || statusUnavailable
   const changeDraft = key => value => setDraft(current => ({ ...current, [key]: value }))
   useEffect(() => {
@@ -846,6 +882,10 @@ function Mailbox({ ctx, identity, profile, queryPrefix: connectionPrefix, status
             menuSetting('Show unread only', settings.unreadOnly, () => toggleSetting('unreadOnly')),
             menuSetting('Confirm every action (send, archive, trash, labels)', settings.confirmActions, () => toggleSetting('confirmActions'), { 'aria-label': 'Confirm every Gmail action. Turn off to commit actions without the review dialog; the backend ticket and readback still run.' }),
             menuSetting('Always show images - remote images may track opens', settings.alwaysShowImages, () => toggleSetting('alwaysShowImages'), { 'aria-label': 'Always show images. Remote images may track email opens.' }),
+            jsx(DropdownMenuSeparator, {}),
+            jsx('div', { style: { padding: '0.35rem 0.55rem', ...muted }, children: `Auto-refresh: ${refreshLabel(settings.refreshSeconds)}` }),
+            ...REFRESH_SECONDS.map(seconds => menuSetting(refreshLabel(seconds), settings.refreshSeconds === seconds,
+              () => setRefresh(seconds), { role: 'menuitemradio', 'aria-checked': settings.refreshSeconds === seconds })),
             jsx(DropdownMenuSeparator, {}),
             jsx('div', { style: { padding: '0.35rem 0.55rem', ...muted }, children: 'Selected message' }),
             jsx(DropdownMenuItem, { disabled: waiting || !selectedMessage || selectedMessage.labelIds.includes('UNREAD'),
@@ -899,7 +939,15 @@ function Mailbox({ ctx, identity, profile, queryPrefix: connectionPrefix, status
           const cardActionsDisabled = waiting || readPending || message.labelIds.includes('TRASH')
           const chips = userLabelChips(message, labelsById)
           const isNew = newIds.has(message.id)
-          return jsxs('article', { tabIndex: -1, style: { ...mobileCard, ...stack, gap: '0.45rem', borderColor: isSelected ? 'var(--ui-accent)' : (isNew ? 'var(--ui-accent)' : undefined), borderStyle: isNew && !isSelected ? 'dashed' : undefined }, children: [
+          const openCard = () => {
+            setSelected(message.id)
+            setLabelId('')
+            requestAnimationFrame(() => detailPanel.current?.scrollIntoView({ block: 'start', behavior: 'auto' }))
+          }
+          // Right-click on the card mirrors the inline actions: open, star,
+          // read-state, delete. Same reviewed pipelines as the card buttons.
+          return jsx(ContextMenu, { children: [
+            jsx(ContextMenuTrigger, { asChild: true, children: jsxs('article', { tabIndex: -1, style: { ...mobileCard, ...stack, gap: '0.45rem', borderColor: isSelected ? 'var(--ui-accent)' : (isNew ? 'var(--ui-accent)' : undefined), borderStyle: isNew && !isSelected ? 'dashed' : undefined }, children: [
             jsxs('div', { style: { ...row, justifyContent: 'space-between' }, children: [
               jsxs('label', { style: { ...row, cursor: 'pointer' }, children: [
                 jsx('input', { type: 'checkbox', checked: isSelected, disabled: waiting || (!isSelected && selectedIds.size >= BATCH_LIMIT),
@@ -914,11 +962,7 @@ function Mailbox({ ctx, identity, profile, queryPrefix: connectionPrefix, status
               ] })
             ] }),
             jsx(Button, { type: 'button', variant: selected === message.id ? 'secondary' : 'ghost', 'aria-pressed': selected === message.id,
-              disabled: waiting, onClick: () => {
-                setSelected(message.id)
-                setLabelId('')
-                requestAnimationFrame(() => detailPanel.current?.scrollIntoView({ block: 'start', behavior: 'auto' }))
-              },
+              disabled: waiting, onClick: openCard,
               style: { ...stack, gap: '0.3rem', alignItems: 'stretch', textAlign: 'left', whiteSpace: 'normal', width: '100%', boxSizing: 'border-box', padding: '0.35rem 0.5rem' },
               children: [
                 jsxs('span', { style: { ...row, justifyContent: 'space-between', gap: '0.75rem' }, children: [
@@ -932,6 +976,20 @@ function Mailbox({ ctx, identity, profile, queryPrefix: connectionPrefix, status
                   children: `#${chipName}` }, chipName)) }, 'labels'),
                 (message.attachments || []).length > 0 && jsx('span', { style: { ...muted, fontSize: '0.75rem' }, children: `📎 ${message.attachments.length} attachment${message.attachments.length > 1 ? 's' : ''}` }, 'atts')
               ] })
+            ] }) }, 'card'),
+            jsxs(ContextMenuContent, { 'aria-label': `Actions for ${message.subject || message.id}`, children: [
+              jsx(ContextMenuItem, { disabled: waiting, onClick: openCard, children: 'Open' }),
+              jsx(ContextMenuSeparator, {}),
+              jsx(ContextMenuItem, { disabled: cardActionsDisabled,
+                onClick: () => prepareOneLabel(message, starred ? 'labels-remove' : 'labels-add', 'STARRED'),
+                children: starred ? '★ Unstar' : '☆ Star' }),
+              jsx(ContextMenuItem, { disabled: cardActionsDisabled,
+                onClick: () => { void prepareCardAction(message, unread ? 'labels-remove' : 'labels-add') },
+                children: unread ? 'Mark as read' : 'Mark as unread' }),
+              jsx(ContextMenuSeparator, {}),
+              jsx(ContextMenuItem, { disabled: cardActionsDisabled,
+                onClick: () => { void prepareCardAction(message, 'trash') }, children: 'Delete' })
+            ] })
           ] }, message.id)
         }),
         jsxs('div', { style: row, children: [
@@ -944,6 +1002,7 @@ function Mailbox({ ctx, identity, profile, queryPrefix: connectionPrefix, status
           action('← Inbox', () => setSelected(''), waiting, { ref: detailHeading }),
           jsxs('div', { style: row, children: [
             action(starredSelected ? '★ Unstar' : '☆ Star', () => selectedMessage && prepareOneLabel(selectedMessage, starredSelected ? 'labels-remove' : 'labels-add', 'STARRED'), waiting || !selectedMessage),
+            action(unreadSelected ? 'Mark as read' : 'Mark as unread', () => prepare(unreadSelected ? 'labels-remove' : 'labels-add', 'UNREAD'), waiting || !selectedMessage),
             jsx(GmailThreadAction, { account: identity.account, threadId: selectedMessage?.threadId,
               ctx, disabled: waiting || !selectedMessage }),
             action('Archive', () => prepare('archive'), waiting || !selectedMessage?.labelIds.includes('INBOX')),
@@ -999,6 +1058,7 @@ function Mailbox({ ctx, identity, profile, queryPrefix: connectionPrefix, status
           jsxs('div', { style: { ...row, borderTop: '1px solid var(--ui-stroke-secondary)', paddingTop: '0.6rem' }, children: [
             action('Back to Inbox', () => setSelected(''), waiting),
             action(starredSelected ? '★ Unstar' : '☆ Star', () => selectedMessage && prepareOneLabel(selectedMessage, starredSelected ? 'labels-remove' : 'labels-add', 'STARRED'), waiting || !selectedMessage),
+            action(unreadSelected ? 'Mark as read' : 'Mark as unread', () => prepare(unreadSelected ? 'labels-remove' : 'labels-add', 'UNREAD'), waiting || !selectedMessage),
             action('Delete', () => prepare('trash'), waiting || !selectedMessage || selectedMessage.labelIds.includes('TRASH'))
           ] }),
           jsxs('div', { style: row, children: [

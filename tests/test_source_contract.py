@@ -148,8 +148,30 @@ class ShippedSourceContractTests(unittest.TestCase):
         self.assertIn("prepareOneLabel(selectedMessage", header_actions)
         self.assertEqual(self.plugin_text.count("prepareOneLabel(selectedMessage"), 2)
 
+    def test_message_card_context_menu_mirrors_the_inline_actions(self):
+        # Right-click on a message card offers Open / Star / read-state /
+        # Delete, all through the same reviewed pipelines as the card buttons.
+        self.assertIn("ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger", self.plugin_text)
+        card = self.plugin_text.split("jsx(ContextMenu, { children: [", 1)[1].split("] }, message.id)", 1)[0]
+        self.assertIn("'aria-label': `Actions for ${message.subject || message.id}`", card)
+        for label in ("'Open'", "'Mark as read' : 'Mark as unread'", "'★ Unstar' : '☆ Star'", "'Delete'"):
+            self.assertIn(label, card)
+        self.assertIn("prepareCardAction(message, unread ? 'labels-remove' : 'labels-add')", card)
+        self.assertIn("prepareCardAction(message, 'trash')", card)
+        self.assertIn("prepareOneLabel(message, starred ? 'labels-remove' : 'labels-add', 'STARRED')", card)
+        # The card action helper accepts both read directions.
+        self.assertIn("(kind === 'labels-add' && isUnread)", self.plugin_text)
+        self.assertIn("addLabelIds: kind === 'labels-add' ? ['UNREAD'] : []", self.plugin_text)
+
+    def test_read_state_toggle_is_available_in_the_open_message(self):
+        # The detail header and the bottom row both offer Mark as read/unread.
+        header = self.plugin_text.split("'aria-label': 'Message detail'", 1)[1].split("ref: detailScroll", 1)[0]
+        self.assertIn("action(unreadSelected ? 'Mark as read' : 'Mark as unread'", header)
+        self.assertIn("prepare(unreadSelected ? 'labels-remove' : 'labels-add', 'UNREAD')", header)
+        self.assertEqual(self.plugin_text.count("action(unreadSelected ? 'Mark as read' : 'Mark as unread'"), 2)
+
     def test_package_version_bumped(self):
-        self.assertIn('version: 1.0.18', (ROOT / 'plugins/gmail/plugin.yaml').read_text(encoding='utf-8'))
+        self.assertIn('version: 1.0.19', (ROOT / 'plugins/gmail/plugin.yaml').read_text(encoding='utf-8'))
 
 if __name__ == "__main__":
     unittest.main()

@@ -15,12 +15,13 @@ function loadFunction(name, nextName, prefix = '') {
   return Function(`${prefix}\n${fn}\nreturn ${name}`)()
 }
 
-const defaults = 'const DEFAULT_SETTINGS = Object.freeze({ autoRefresh: false, unreadOnly: false, confirmActions: true, alwaysShowImages: false })'
+const defaults = 'const DEFAULT_SETTINGS = Object.freeze({ refreshSeconds: 0, unreadOnly: false, confirmActions: true, alwaysShowImages: false })\nconst REFRESH_SECONDS = Object.freeze([0, 300, 600, 900, 1800, 3600])\nconst DEFAULT_REFRESH_SECONDS = 300'
 const settings = loadFunction('gmailSettings', 'settingsStorageKey', defaults)
 const storageKey = loadFunction('settingsStorageKey', 'toggleGmailSetting')
 const toggle = loadFunction('toggleGmailSetting', 'inboxQuery', defaults)
 const query = loadFunction('inboxQuery', 'autoRefreshInterval')
-const interval = loadFunction('autoRefreshInterval', 'shouldConfirmAction')
+const interval = loadFunction('autoRefreshInterval', 'refreshLabel')
+const label = loadFunction('refreshLabel', 'shouldConfirmAction', defaults)
 const confirmAction = loadFunction('shouldConfirmAction', null)
 const toggleSelection = loadFunction('toggleMessageSelection', 'gmailSettings', 'const BATCH_LIMIT = 20')
 const starChange = loadFunction('starLabelChange', 'contextText')
@@ -30,10 +31,17 @@ const dateOf = loadFunction('shortDate', 'formatAttachmentSize')
 const sizeFmt = loadFunction('formatAttachmentSize', 'newMessageIds')
 const newIds = loadFunction('newMessageIds', 'menuSetting')
 
-test('preference defaults and persisted booleans are explicit', () => {
-  assert.deepEqual(settings(null), { autoRefresh: false, unreadOnly: false, confirmActions: true, alwaysShowImages: false })
-  assert.deepEqual(settings({ autoRefresh: true, unreadOnly: 'yes', confirmActions: false, alwaysShowImages: true, unknown: true }),
-    { autoRefresh: true, unreadOnly: false, confirmActions: false, alwaysShowImages: true })
+test('preference defaults and persisted values are explicit', () => {
+  assert.deepEqual(settings(null), { refreshSeconds: 0, unreadOnly: false, confirmActions: true, alwaysShowImages: false })
+  assert.deepEqual(settings({ refreshSeconds: 900, unreadOnly: 'yes', confirmActions: false, alwaysShowImages: true, unknown: true }),
+    { refreshSeconds: 900, unreadOnly: false, confirmActions: false, alwaysShowImages: true })
+  // Only an offered interval is accepted; a numeric string is normalised.
+  assert.equal(settings({ refreshSeconds: 42 }).refreshSeconds, 0)
+  assert.equal(settings({ refreshSeconds: '600' }).refreshSeconds, 600)
+  // A stored legacy boolean migrates to the smallest offered interval.
+  assert.equal(settings({ autoRefresh: true }).refreshSeconds, 300)
+  assert.equal(settings({ autoRefresh: false }).refreshSeconds, 0)
+  assert.equal(settings({ autoRefresh: true, refreshSeconds: 1800 }).refreshSeconds, 1800)
 })
 
 test('Always show images is independently toggleable and cannot change another preference', () => {
@@ -41,7 +49,7 @@ test('Always show images is independently toggleable and cannot change another p
   const enabled = toggle(original, 'alwaysShowImages')
   assert.equal(original.alwaysShowImages, false)
   assert.equal(enabled.alwaysShowImages, true)
-  assert.equal(enabled.autoRefresh, original.autoRefresh)
+  assert.equal(enabled.refreshSeconds, original.refreshSeconds)
   assert.equal(enabled.unreadOnly, original.unreadOnly)
   assert.equal(toggle(enabled, 'alwaysShowImages').alwaysShowImages, false)
 })
@@ -52,12 +60,22 @@ test('settings persist under isolated profile and normalized account keys', () =
   assert.notEqual(storageKey('default', 'a@example.com'), storageKey('default', 'b@example.com'))
 })
 
-test('auto-refresh toggle controls only bounded one-minute mailbox polling', () => {
-  const off = settings(null)
-  const on = toggle(off, 'autoRefresh')
-  assert.equal(interval(off), false)
-  assert.equal(interval(on), 60000)
-  assert.equal(interval(toggle(on, 'autoRefresh')), false)
+test('auto-refresh offers 5/10/15/30/60 minutes and maps to a poll interval', () => {
+  const offered = source.match(/const REFRESH_SECONDS = Object\.freeze\(\[([^\]]+)\]\)/)
+  assert.ok(offered, 'the offered intervals are declared')
+  assert.deepEqual(offered[1].split(',').map(part => Number(part.trim())), [0, 300, 600, 900, 1800, 3600])
+  assert.equal(interval(settings(null)), false)
+  assert.deepEqual(
+    [[300, 300000], [600, 600000], [900, 900000], [1800, 1800000], [3600, 3600000]]
+      .map(([seconds]) => interval({ refreshSeconds: seconds })),
+    [300000, 600000, 900000, 1800000, 3600000])
+  assert.equal(label(0), 'Manual only')
+  assert.equal(label(300), 'Every 5 minutes')
+  assert.equal(label(600), 'Every 10 minutes')
+  assert.equal(label(900), 'Every 15 minutes')
+  assert.equal(label(1800), 'Every 30 minutes')
+  assert.equal(label(3600), 'Every 1 hour')
+  assert.equal(label(42), 'Manual only')
 })
 
 test('unread filter appends Gmail operator once and restores original query when off', () => {

@@ -24,11 +24,11 @@ Search, reading, and thread inspection are read-only except opening an unread me
 
 ## Mailbox preferences and More
 
-Each inbox message card has a **Mark as read** action when unread and a **Delete** action. Mark as read removes only the `UNREAD` label after exact review and backend readback; Delete moves the selected card message to Gmail Trash (not permanent deletion), with the existing confirmation preference and backend ticket/readback protections preserved.
+Each inbox message card has a **Mark as read** action when unread and a **Delete** action, and a **right-click context menu** on the card offers **Open**, **☆ Star / ★ Unstar**, **Mark as read / Mark as unread**, and **Delete** — all through the same reviewed pipelines as the inline buttons. Mark as read removes only the `UNREAD` label after exact review and backend readback; Delete moves the selected card message to Gmail Trash (not permanent deletion), with the existing confirmation preference and backend ticket/readback protections preserved.
 
 In Gmail, open the **More** dropdown in the mailbox header (available both in the inbox and message detail). The toggles save persistently for the current Hermes profile and Gmail account:
 
-- **Auto-refresh every 60 seconds** — off by default; enable it to poll the current search at a bounded one-minute interval, or turn it off to stop automatic polling.
+- **Auto-refresh** — pick 5, 10, 15, 30 or 60 minutes, or **Manual only**; the choice is saved per profile and Gmail account and drives the mailbox poll interval.
 - **Show unread only** — off by default; enable it to append Gmail's `is:unread` operator to the current search, or turn it off to return to the unfiltered search.
 - **Confirm every action (send, archive, trash, labels)** — on by default; turn it off to skip the on-screen review dialog for every Gmail action (send, reply, archive, trash, label changes, and bulk actions) so each click commits straight through; turn it back on to require the review dialog again. Actions remain deliberate button presses either way, action labels drop the "Review" wording while the dialog is skipped, and the backend prepare ticket, account/profile binding, exact message snapshot validation, and readback verification remain required in both modes.
 - **Always show images** — off by default; when enabled, remote HTML images load as messages open. Remote images may track opens. Turning the option off immediately removes image sources; the per-message **Load images (N)** action remains available.
