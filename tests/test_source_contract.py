@@ -139,8 +139,17 @@ class ShippedSourceContractTests(unittest.TestCase):
         self.assertIn('_message_snapshot(current) != ticket.message_snapshot', self.backend_text)
         self.assertIn('expected_labels_for_action(ticket.action, ticket.message_snapshot, payload)', self.backend_text)
 
+    def test_star_is_available_in_the_open_message_header(self):
+        # The sticky detail header offers the star toggle next to Archive and
+        # Delete; the bottom action row keeps its own copy.
+        header = self.plugin_text.split("'aria-label': 'Message detail'", 1)[1]
+        header_actions = header.split("ref: detailScroll", 1)[0]
+        self.assertIn("action(starredSelected ? '★ Unstar' : '☆ Star'", header_actions)
+        self.assertIn("prepareOneLabel(selectedMessage", header_actions)
+        self.assertEqual(self.plugin_text.count("prepareOneLabel(selectedMessage"), 2)
+
     def test_package_version_bumped(self):
-        self.assertIn('version: 1.0.17', (ROOT / 'plugins/gmail/plugin.yaml').read_text(encoding='utf-8'))
+        self.assertIn('version: 1.0.18', (ROOT / 'plugins/gmail/plugin.yaml').read_text(encoding='utf-8'))
 
 if __name__ == "__main__":
     unittest.main()

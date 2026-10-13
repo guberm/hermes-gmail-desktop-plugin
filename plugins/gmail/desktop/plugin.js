@@ -943,6 +943,7 @@ function Mailbox({ ctx, identity, profile, queryPrefix: connectionPrefix, status
         jsxs('div', { style: { ...row, justifyContent: 'space-between', padding: '0.75rem', borderBottom: '1px solid var(--ui-stroke-secondary)', position: 'sticky', top: 0, background: 'var(--ui-bg-secondary)', zIndex: 1 }, children: [
           action('← Inbox', () => setSelected(''), waiting, { ref: detailHeading }),
           jsxs('div', { style: row, children: [
+            action(starredSelected ? '★ Unstar' : '☆ Star', () => selectedMessage && prepareOneLabel(selectedMessage, starredSelected ? 'labels-remove' : 'labels-add', 'STARRED'), waiting || !selectedMessage),
             jsx(GmailThreadAction, { account: identity.account, threadId: selectedMessage?.threadId,
               ctx, disabled: waiting || !selectedMessage }),
             action('Archive', () => prepare('archive'), waiting || !selectedMessage?.labelIds.includes('INBOX')),
